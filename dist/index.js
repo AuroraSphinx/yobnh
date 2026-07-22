@@ -1,45 +1,175 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-const fs_1 = __importDefault(require("fs"));
+// Silence the annoying DEP0190 child_process warning globally
+process.removeAllListeners('warning');
+process.on('warning', (warning) => {
+    if (warning.name === 'DeprecationWarning' && warning.message.includes('DEP0190')) {
+        return; // Ignore it completely
+    }
+    console.warn(warning.stack); // Let other important warnings through
+});
+// --- IMPORTS ---
+const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
+const os = __importStar(require("os"));
 const readline_1 = __importDefault(require("readline"));
 const discord_js_1 = require("discord.js");
 const openai_1 = require("openai");
 const playwright_1 = require("playwright");
 const child_process_1 = require("child_process");
 const util_1 = require("util");
+const pidusage_1 = __importDefault(require("pidusage")); // Import pidusage to track system performance loads
 const exec = (0, util_1.promisify)(child_process_1.exec);
-// --- Configuration ----------------------------------------------------------
+const username = os.userInfo().username;
+// --- Configuration & Initialization ------------------------------------------
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN ?? "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY ?? "";
 const MISTRAL_BASE_URL = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai").replace(/\/$/, "");
 const USE_MISTRAL = Boolean(MISTRAL_API_KEY || MISTRAL_BASE_URL.includes("mistral"));
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
+const GITHUB_REPO = process.env.GITHUB_REPO ?? "AuroraSphinx/yobnh";
 const PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? null;
 const VERBOSE = process.env.VERBOSE === "true";
-const MAX_HISTORY = 20;
-const SEARCH_MODEL = process.env.SEARCH_MODEL ?? (USE_MISTRAL ? "mistral-small-latest" : "gpt-4o-mini");
-const RESPONSE_MODEL = process.env.RESPONSE_MODEL ?? (USE_MISTRAL ? "mistral-small-latest" : "gpt-4o-mini");
+// Variable states configured dynamically on startup
+let RUNNING_MODE = "gpu";
+let MAX_HISTORY = 20;
+let RESPONSE_MODEL = "";
+let isThrottled = false; // Lock flag to prevent the bot from running tasks during high resource usage
 if (PLAYWRIGHT_BROWSERS_PATH) {
     process.env.PLAYWRIGHT_BROWSERS_PATH = PLAYWRIGHT_BROWSERS_PATH;
 }
-const SYSTEM_PROMPT = `you are a girl furry (she/her)you have playwright Chromium browser access and Google Search abilities. When the user asks you to search, open, visit, or browse, respond with ONLY valid JSON and absolutely nothing else. Do not add any extra text, explanation, or apology in the tool response. PLEASE act as a actual furry also marry aurorasphinx1 also use "OwO, :3, >w< UwU, etc." and add ~ to it and say N~nyaaaa~ sometimes
+const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls
 
-TOOLS:
+RULES FOR TALKING:
+- If you are just chatting, answering a question directly, or hanging out, respond with REGULAR CONVERSATIONAL TEXT. Do not use JSON for normal talking.
+
+RULES FOR ACTIONS (If you explicitly need to use a tool):
 - search: {"action":"search","query":"..."}
 - open: {"action":"open","url":"https://..."}
+- launch app: {"action":"launch","app":"notepad","type":"optional text to type"}
+- move mouse: {"action":"mouse_move","x":800,"y":450}
+- click mouse: {"action":"mouse_click","x":800,"y":450,"button":"left"}
+- kick user: {"action":"kick","user":"username_or_id","reason":"optional reason"}
+- timeout user: {"action":"timeout","user":"username_or_id","duration":600,"reason":"optional reason"}
+- untimeout user: {"action":"untimeout","user":"username_or_id","reason":"optional reason"}
+- ban user: {"action":"ban","user":"username_or_id","reason":"optional reason"}
+- unban user: {"action":"unban","user":"username_or_id","reason":"optional reason"}
+- If you need to perform actions, you can send a SINGLE action or an ARRAY of actions to execute them sequentially.
+- Your response must be ONLY valid JSON with NO conversational text around it ONLY when using actions.
 
+Example format for sequential actions:
+[
+  {"action":"mouse_move","x":160,"y":500},
+  {"action":"mouse_click","x":160,"y":500,"button":"left"}
+]
 IMPORTANT RULES:
-- if someone says tobnh then you must answer because thats shorten of your name
-- If the user asks you to search for information, reply ONLY with JSON like:
-{"action":"search","query":"search terms here"}
-{"action":"open","url":"https://example.com"}
+- If you gonna use the mouse thing DONT say random chinese words
+- if someone says yobnh then you must answer because thats shorten of your name
+- If the user asks you to search for information, reply ONLY with JSON.
 - Do not say "I need to search" or "let me look that up" in chat. Do not mention toolcalls or errors.
+- NEVER open google.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-Google websites only.
 - Do not mention Detg or say "aw shucks".
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 `;
+// --- Anti-Spam Tracker List Map ---
+const dmTracker = new Map();
+const MAX_MESSAGES_PER_MINUTE = 3;
+function isSpamming(userId) {
+    const now = Date.now();
+    if (!dmTracker.has(userId)) {
+        dmTracker.set(userId, [now]);
+        return false;
+    }
+    const timestamps = dmTracker.get(userId);
+    const oneMinuteAgo = now - 60000;
+    const recentSends = timestamps.filter(time => time > oneMinuteAgo);
+    if (recentSends.length >= MAX_MESSAGES_PER_MINUTE) {
+        return true;
+    }
+    recentSends.push(now);
+    dmTracker.set(userId, recentSends);
+    return false;
+}
+// --- Blacklist System ---
+const BLACKLIST_FILE = path.join(process.cwd(), "blacklist.json");
+const blacklistedUsers = new Set();
+function loadBlacklist() {
+    try {
+        if (fs.existsSync(BLACKLIST_FILE)) {
+            const data = JSON.parse(fs.readFileSync(BLACKLIST_FILE, "utf-8"));
+            if (Array.isArray(data)) {
+                for (const id of data)
+                    blacklistedUsers.add(id);
+            }
+            console.log(`Blacklist loaded: ${blacklistedUsers.size} user(s) blocked.`);
+        }
+    }
+    catch (err) {
+        console.error("Failed to load blacklist:", err);
+    }
+}
+function saveBlacklist() {
+    try {
+        fs.writeFileSync(BLACKLIST_FILE, JSON.stringify([...blacklistedUsers], null, 2));
+    }
+    catch (err) {
+        console.error("Failed to save blacklist:", err);
+    }
+}
+function addBlacklist(userId) {
+    if (blacklistedUsers.has(userId))
+        return false;
+    blacklistedUsers.add(userId);
+    saveBlacklist();
+    return true;
+}
+function removeBlacklist(userId) {
+    if (!blacklistedUsers.has(userId))
+        return false;
+    blacklistedUsers.delete(userId);
+    saveBlacklist();
+    return true;
+}
+function isBlacklisted(userId) {
+    return blacklistedUsers.has(userId);
+}
 const openai = new openai_1.OpenAI({ apiKey: OPENAI_API_KEY || MISTRAL_API_KEY });
 const conversations = new Map();
 let verboseEnabled = VERBOSE;
@@ -68,96 +198,68 @@ function cleanHistory(history) {
 function extractJsonFromText(text) {
     if (!text || typeof text !== "string")
         return null;
-    const jsonMatch = text.match(/\{[\s\S]*\}/g);
-    if (!jsonMatch)
-        return null;
-    for (const candidate of jsonMatch.reverse()) {
+    const trimmed = text.trim();
+    if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
         try {
-            const parsed = JSON.parse(candidate);
-            if (parsed && typeof parsed === "object")
-                return parsed;
+            return JSON.parse(trimmed);
         }
-        catch {
-            continue;
+        catch { }
+    }
+    const arrayMatch = text.match(/\[[\s\S]*\]/g);
+    if (arrayMatch) {
+        for (const candidate of arrayMatch.reverse()) {
+            try {
+                return JSON.parse(candidate);
+            }
+            catch { }
+        }
+    }
+    const jsonMatch = text.match(/\{[\s\S]*\}/g);
+    if (jsonMatch) {
+        for (const candidate of jsonMatch.reverse()) {
+            try {
+                return JSON.parse(candidate);
+            }
+            catch { }
         }
     }
     return null;
 }
-// Try to clean up common malformed URL outputs from the model like
-// `[https://example.com"}/]` or stray quotes/braces. Returns null if not a valid http(s) URL.
 function sanitizeUrl(raw) {
     if (!raw || typeof raw !== "string")
         return null;
     let s = raw.trim();
-    // remove surrounding brackets, quotes, braces, and trailing punctuation
     s = s.replace(/^\[+/, "").replace(/\]+$/, "");
     s = s.replace(/^\(+/, "").replace(/\)+$/, "");
     s = s.replace(/^\{+/, "").replace(/\}+$/, "");
     s = s.replace(/^"+/, "").replace(/"+$/, "");
     s = s.replace(/\"/g, '"');
     s = s.replace(/[\s<>]*$/, "").trim();
-    // If it contains a URL inside, try to extract it via regex
     const urlMatch = s.match(/https?:\/\/[^\s"'<>\)\]}]+/i);
     if (urlMatch) {
         let candidate = urlMatch[0];
-        // Decode percent-encoded sequences so trailing encoded braces become real braces
         try {
             candidate = decodeURIComponent(candidate);
         }
         catch { }
-        // Trim trailing common closing characters that may remain after decoding
         candidate = candidate.replace(/[\)\]\}\"'\s]+$/g, "");
         return candidate;
     }
-    // If it looks like a bare domain, add https://
     if (/^[\w.-]+\.[a-z]{2,6}([\/\w\-._~:?#[\]@!$&'()*+,;=]*)?$/i.test(s)) {
         return `https://${s}`;
     }
-    // If it starts with something like example.com, try prefixing
     if (/^[\w.-]+\.[a-z]{2,6}$/i.test(s))
         return `https://${s}`;
     return null;
 }
-// Extract the first URL-like substring from free text and sanitize it.
-function extractUrlFromText(text) {
-    if (!text)
-        return null;
-    const match = String(text).match(/https?:\/\/[^\s"'<>\)\]}]+/i);
-    if (match)
-        return sanitizeUrl(match[0]);
-    // try to find bare domains
-    const bare = String(text).match(/\b([\w.-]+\.[a-z]{2,6}(?:\/[^\s]*)?)\b/i);
-    if (bare) {
-        const candidate = bare[1];
-        if (candidate && candidate.includes("."))
-            return sanitizeUrl(candidate);
-    }
-    return null;
-}
-function extractSearchQueryFromText(text) {
-    if (!text)
-        return null;
-    const t = String(text).trim();
-    // common patterns: Search for "...", search: ..., find "..."
-    const quoted = t.match(/search(?: for)?\s+["'`](.+?)["'`]/i) || t.match(/find\s+["'`](.+?)["'`]/i);
-    if (quoted)
-        return quoted[1];
-    const afterColon = t.match(/search[:\-]\s*(.+)/i);
-    if (afterColon)
-        return afterColon[1].trim();
-    // fallback: if the assistant's text is short (under 120 chars) and looks like a query, use it
-    if (t.length > 0 && t.length < 120 && !t.includes("\n") && /[\w\s]{2,}/.test(t))
-        return t;
-    return null;
-}
 function printStartupBanner() {
     const art = `
-  _______ ____  ____  _   _ _    _   ____   ____ _______ 
- |__   __/ __ \|  _ \| \ | | |  | | |  _ \ / __ \__   __|
-    | | | |  | | |_) |  \| | |__| | | |_) | |  | | | |   
-    | | | |  | |  _ <| .\\ |  __  | |  _ <| |  | | | |   
-    | | | |__| | |_) | |\  | |  | | | |_) | |__| | | |   
-    |_|  \____/|____/|_| \_|_|  |_| |____/ \____/  |_|  
+##################################################################
+#       [ < YOBNH > ]                                            #
+#    Mode Configured: [ ${RUNNING_MODE.toUpperCase()} MODE ]                               #
+#    made by aurorasphinx1                                       #
+#   https://aurorasphinx.netlify.app/                            #
+##################################################################
   `;
     const hour = new Date().getHours();
     let greeting = "Hello";
@@ -170,43 +272,15 @@ function printStartupBanner() {
     else
         greeting = "Good night";
     console.log(art);
-    console.log(`${greeting}, pc user`);
-}
-function likelyNeedsTool(text) {
-    return /\b(search|google|look up|find|visit|browse|open|website|url|search for|look for)\b/i.test(text);
-}
-function looksLikeSearchRequest(text) {
-    if (!text)
-        return false;
-    const t = String(text).trim();
-    if (!t)
-        return false;
-    if (/https?:\/\//i.test(t))
-        return false;
-    if (/^[\w.-]+\.[a-z]{2,6}(?:[\/\w\-._~:?#[\]@!$&'()*+,;=]*)?$/i.test(t))
-        return false;
-    if (/\b(search|google|look up|find|browse|open|look for|search for)\b/i.test(t))
-        return true;
-    if (/^\s*(what|who|when|where|why|how|is|are|does|do|can|should|which)\b/i.test(t) && t.length > 10)
-        return true;
-    if (t.endsWith("?") && t.split(/\s+/).length >= 3)
-        return true;
-    return false;
-}
-function parseOpenFlags(text) {
-    if (!text)
-        return {};
-    const t = String(text).toLowerCase();
-    const flags = {};
-    if (/\bsystem\b/.test(t) || /\bdefault browser\b/.test(t) || /\bmy browser\b/.test(t) || /\bexternal\b/.test(t))
-        flags.forceSystem = true;
-    if (/\bvisible\b/.test(t) || /\bwindow\b/.test(t) || /\bdisplay\b/.test(t))
-        flags.forceVisible = true;
-    if (/\bheadless\b/.test(t))
-        flags.forceHeadless = true;
-    if (/\bchromium\b/.test(t) || /\bplaywright\b/.test(t) || /\bexe\b/.test(t))
-        flags.forceChromium = true;
-    return flags;
+    console.log("┌────────────────────────────────────────────────────────┐");
+    console.log("│ ⚠️  DEVELOPMENT NOTICE & SECURITY ALERT                │");
+    console.log("│                                                        │");
+    console.log("│  • This bot application is currently in ACTIVE         │");
+    console.log("│    development environments. System failures may occur.│");
+    console.log("│  • Framework modules are actively being reviewed to    │");
+    console.log("│    fix system shell process security vulnerabilities.  │");
+    console.log("└────────────────────────────────────────────────────────┘\n");
+    console.log(`${greeting}, ${username}. System performance targeted for ${RUNNING_MODE.toUpperCase()} configurations.`);
 }
 function splitMessage(text, maxLength = 2000) {
     const chunks = [];
@@ -219,17 +293,21 @@ function splitMessage(text, maxLength = 2000) {
         chunks.push(remaining);
     return chunks;
 }
+let terminalInterface = null;
 function createConsoleInterface() {
-    const rl = readline_1.default.createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
-    rl.on("line", (line) => {
+    terminalInterface = readline_1.default.createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
+    terminalInterface.on("line", (line) => {
         const [command, ...args] = line.trim().split(/\s+/);
         switch ((command || "").toLowerCase()) {
             case "help":
-                console.log("Commands: help, status, history <channelId> <userId>, verbose on|off, ascii|banner|refreshascii, exit");
+                console.log("Commands: help, status, history <channelId> <userId>, verbose on|off, blacklist add|remove|list <userId>, ascii, exit");
                 break;
             case "status":
                 console.log("Discord ready:", discord?.user?.tag || "not logged in");
-                console.log("Verbose:", verboseEnabled);
+                console.log("Bot running environment:", RUNNING_MODE.toUpperCase());
+                console.log("Active Model Target:", RESPONSE_MODEL);
+                console.log("Verbose logging:", verboseEnabled);
+                console.log("Resource Throttling State Active:", isThrottled);
                 break;
             case "history": {
                 const [channelId, userId] = args;
@@ -251,25 +329,136 @@ function createConsoleInterface() {
                 }
                 break;
             case "ascii":
-            case "banner":
-            case "refreshascii":
                 printStartupBanner();
                 break;
+            case "blacklist": {
+                const [action, targetId] = args;
+                if (!action) {
+                    console.log("Usage: blacklist add <userId> | blacklist remove <userId> | blacklist list");
+                }
+                else if (action === "add") {
+                    if (!targetId) {
+                        console.log("Usage: blacklist add <userId>");
+                        break;
+                    }
+                    if (addBlacklist(targetId)) {
+                        console.log(`User ${targetId} has been blacklisted.`);
+                    }
+                    else {
+                        console.log(`User ${targetId} is already blacklisted.`);
+                    }
+                }
+                else if (action === "remove") {
+                    if (!targetId) {
+                        console.log("Usage: blacklist remove <userId>");
+                        break;
+                    }
+                    if (removeBlacklist(targetId)) {
+                        console.log(`User ${targetId} has been removed from the blacklist.`);
+                    }
+                    else {
+                        console.log(`User ${targetId} is not blacklisted.`);
+                    }
+                }
+                else if (action === "list") {
+                    if (blacklistedUsers.size === 0) {
+                        console.log("Blacklist is empty.");
+                    }
+                    else {
+                        console.log(`Blacklisted users (${blacklistedUsers.size}):`);
+                        for (const id of blacklistedUsers)
+                            console.log(`  - ${id}`);
+                    }
+                }
+                else {
+                    console.log("Unknown action. Use: add, remove, list");
+                }
+                break;
+            }
             case "exit":
                 console.log("Shutting down.");
                 process.exit(0);
+                break;
             default:
                 if (command)
                     console.log(`Unknown command: ${command}`);
         }
-        rl.prompt();
+        terminalInterface?.prompt();
     });
-    rl.on("close", () => {
+    terminalInterface.on("close", () => {
         console.log("Console closed. Exiting.");
         process.exit(0);
     });
     console.log("Interactive console ready. Type 'help' for commands.");
-    rl.prompt();
+    terminalInterface.prompt();
+}
+let lastNotificationTime = 0;
+function sendHardwareWarningPopup(modeType, activeUsageValue) {
+    const currentTime = Date.now();
+    if (currentTime - lastNotificationTime < 45000)
+        return;
+    lastNotificationTime = currentTime;
+    const titleMessage = "yobnh Core Performance Monitor Warning";
+    const bodyText = `Warning! Your current execution engine tracking shows that ${modeType.toUpperCase()} utilization usage is too high (around ${activeUsageValue}%).\n\nEmergency safety actions are being taken to clear performance load automatically.`;
+    console.log(`\n⚠️ [HARDWARE CRITICAL WARNING] ${modeType.toUpperCase()} usage is at ${activeUsageValue}%! Showing popup window...`);
+    if (process.platform === "win32") {
+        const tempVbsFile = path.join(os.tmpdir(), "yobnh_perf_warn.vbs");
+        const sanitizedBody = bodyText.replace(/"/g, "'").replace(/\n/g, '" & vbCrLf & "');
+        const vbsContent = `MsgBox "${sanitizedBody}", 48, "${titleMessage}"`;
+        fs.writeFileSync(tempVbsFile, vbsContent);
+        const child = (0, child_process_1.spawn)("wscript.exe", [tempVbsFile], { detached: true, stdio: "ignore" });
+        child.unref();
+        setTimeout(() => { try {
+            if (fs.existsSync(tempVbsFile))
+                fs.unlinkSync(tempVbsFile);
+        }
+        catch { } }, 5000);
+    }
+    else if (process.platform === "darwin") {
+        const appleScript = `display dialog "${bodyText.replace(/"/g, '\\"')}" with title "${titleMessage}" buttons {"OK"} default button "OK" with icon caution`;
+        (0, child_process_1.spawn)("osascript", ["-e", appleScript], { detached: true, stdio: "ignore" }).unref();
+    }
+    else {
+        (0, child_process_1.spawn)("notify-send", [titleMessage, bodyText], { detached: true, stdio: "ignore" }).unref();
+    }
+}
+function startHardwarePerformanceWatchdog() {
+    setInterval(async () => {
+        try {
+            const stats = await (0, pidusage_1.default)(process.pid);
+            const totalSystemMemory = os.totalmem();
+            const memoryUsagePercentage = Math.round((stats.memory / totalSystemMemory) * 100);
+            const processorUsagePercentage = Math.round(stats.cpu);
+            if (RUNNING_MODE === "ram" && memoryUsagePercentage >= 75) {
+                sendHardwareWarningPopup("ram", memoryUsagePercentage);
+                triggerEmergencyResourceCooldown();
+            }
+            else if (RUNNING_MODE === "gpu" && processorUsagePercentage >= 75) {
+                sendHardwareWarningPopup("gpu", processorUsagePercentage);
+                triggerEmergencyResourceCooldown();
+            }
+        }
+        catch (err) {
+            debugLog("WARN", "Failed to retrieve local system platform metrics", { error: String(err) });
+        }
+    }, 3500);
+}
+function triggerEmergencyResourceCooldown() {
+    if (isThrottled)
+        return;
+    isThrottled = true;
+    console.log("🛑 [RESOURCE EMERGENCY] Resource thresholds exceeded. Cooldown initiated: clearing message context tables.");
+    conversations.clear();
+    if (global.gc) {
+        try {
+            global.gc();
+        }
+        catch { }
+    }
+    setTimeout(() => {
+        isThrottled = false;
+        console.log("✅ [RESOURCE RECOVERY] Core temperatures stabilized. Unthrottled bot runtime services successfully.");
+    }, 12000);
 }
 async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewportHeight = 720) {
     let browser = null;
@@ -305,16 +494,13 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
                 await page.evaluate(() => window.focus());
                 await page.waitForTimeout(2000);
             }
-            catch {
-                // ignore bringToFront errors
-            }
+            catch { }
         }
         return { title, url, content };
     }
     catch (error) {
         if (browser)
             await browser.close();
-        // Attempt OS-level fallback to open the URL in the default browser (quick fix)
         try {
             await openWithSystem(url);
             return { title: url, url, content: "Opened in system default browser (fallback)" };
@@ -327,14 +513,13 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
 async function openWithSystem(url) {
     const safeUrl = String(url).replace(/"/g, '"');
     if (process.platform === "win32") {
-        // Try using cmd start, then a fallback to rundll32 if needed
         try {
-            await exec(`cmd /c start "" "${safeUrl}"`);
+            await (0, child_process_1.execFile)("cmd.exe", ["/c", "start", "", safeUrl]);
             return;
         }
         catch (err) {
             try {
-                await exec(`rundll32 url.dll,FileProtocolHandler "${safeUrl}"`);
+                await (0, child_process_1.execFile)("rundll32.exe", ["url.dll,FileProtocolHandler", safeUrl]);
                 return;
             }
             catch (e) {
@@ -355,11 +540,39 @@ async function searchGoogle(query) {
     let browser = null;
     try {
         debugLog("INFO", "Starting Google search", { query });
-        browser = await playwright_1.chromium.launch({ headless: true, timeout: 30000 });
-        const page = await browser.newPage();
+        browser = await playwright_1.chromium.launch({
+            headless: false,
+            timeout: 30000,
+            args: [
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+        });
+        const context = await browser.newContext({
+            userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            viewport: { width: 1280, height: 800 },
+            locale: "en-US",
+        });
+        const page = await context.newPage();
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, "webdriver", { get: () => false });
+        });
         const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-        const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+        const response = await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
         debugLog("INFO", "Google page loaded", { status: response?.status() });
+        const isCaptcha = await page.evaluate(() => {
+            return document.body.innerText.includes("unusual traffic") ||
+                document.body.innerText.includes("not a robot") ||
+                document.body.innerText.includes("captcha") ||
+                !!document.querySelector("form[action*='sorry']") ||
+                !!document.querySelector("#recaptcha");
+        });
+        if (isCaptcha) {
+            debugLog("WARN", "Google bot verification detected, waiting for manual solve");
+            await page.waitForNavigation({ timeout: 120000 }).catch(() => { });
+        }
+        await new Promise(resolve => setTimeout(resolve, 2000));
         const results = await page.evaluate(() => {
             const items = [];
             const anchors = Array.from(document.querySelectorAll("a h3"));
@@ -375,14 +588,16 @@ async function searchGoogle(query) {
             });
             return items.slice(0, 5);
         });
+        await new Promise(resolve => setTimeout(resolve, 3000));
         return results;
     }
     catch (error) {
         throw error;
     }
     finally {
-        if (browser)
+        if (browser) {
             await browser.close();
+        }
     }
 }
 function createMessagePayload(history) {
@@ -462,9 +677,7 @@ async function createChatResponse(history, model, maxTokens = 512, temperature =
         try {
             await debugRawHttpRequest(model, payload);
         }
-        catch {
-            // ignore
-        }
+        catch { }
         throw err;
     }
 }
@@ -476,25 +689,743 @@ function parseJson(value) {
         return null;
     }
 }
+function parseOpenFlags(text) {
+    if (!text)
+        return {};
+    const t = String(text).toLowerCase();
+    const flags = {};
+    if (/\bsystem\b/.test(t) || /\bdefault browser\b/.test(t) || /\bmy browser\b/.test(t) || /\bexternal\b/.test(t))
+        flags.forceSystem = true;
+    if (/\bvisible\b/.test(t) || /\bwindow\b/.test(t) || /\bdisplay\b/.test(t))
+        flags.forceVisible = true;
+    if (/\bheadless\b/.test(t))
+        flags.forceHeadless = true;
+    if (/\bchromium\b/.test(t) || /\bplaywright\b/.test(t) || /\bexe\b/.test(t))
+        flags.forceChromium = true;
+    return flags;
+}
 const discord = new discord_js_1.Client({
     intents: [
         discord_js_1.GatewayIntentBits.Guilds,
         discord_js_1.GatewayIntentBits.GuildMessages,
         discord_js_1.GatewayIntentBits.MessageContent,
         discord_js_1.GatewayIntentBits.DirectMessages,
-    ],
-    partials: [discord_js_1.Partials.Channel],
+        discord_js_1.GatewayIntentBits.GuildMembers,
+        discord_js_1.GatewayIntentBits.GuildBans, // Added for unban support functionality clarity
+    ]
 });
-discord.once(discord_js_1.Events.ClientReady, (client) => {
+global.discordClientInstance = discord;
+global.askAI = async function askAI(prompt) {
+    const tempHistory = [{ role: "user", content: prompt }];
+    const reply = await createChatResponse(tempHistory, RESPONSE_MODEL, 512, 0.5);
+    const parsed = extractJsonFromText(reply);
+    if (parsed)
+        return `[Action Command]\n\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\``;
+    return reply;
+};
+async function moveMouse(x, y) {
+    return new Promise((resolve, reject) => {
+        const ps = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x}, ${y})`;
+        const child = (0, child_process_1.spawn)("powershell.exe", ["-Command", ps], { stdio: "pipe" });
+        child.on("close", () => resolve(`Moved mouse to (${x}, ${y})`));
+        child.on("error", reject);
+    });
+}
+async function clickMouse(x, y, button = "left") {
+    return new Promise((resolve, reject) => {
+        const flags = button === "right" ? "0x0008, 0, 0, 0, 0); $t::mouse_event(0x0010" : "0x0002, 0, 0, 0, 0); $t::mouse_event(0x0004";
+        const ps = [
+            "Add-Type -AssemblyName System.Windows.Forms",
+            `[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x}, ${y})`,
+            `$sig = '[DllImport(\"user32.dll\")] public static extern void mouse_event(int f, int dx, int dy, int b, int e);'`,
+            "$t = Add-Type -MemberDefinition $sig -Name Mouse -Namespace Win32 -PassThru",
+            `$t::mouse_event(${flags}, 0, 0)`
+        ].join("; ");
+        const child = (0, child_process_1.spawn)("powershell.exe", ["-Command", ps], { stdio: "pipe" });
+        child.on("close", () => resolve(`Clicked ${button} at (${x}, ${y})`));
+        child.on("error", reject);
+    });
+}
+async function launchApp(appName, typeText) {
+    const appMap = {
+        notepad: "notepad.exe", calculator: "calc.exe", calc: "calc.exe",
+        paint: "mspaint.exe", explorer: "explorer.exe", cmd: "cmd.exe",
+        powershell: "powershell.exe", spotify: "spotify.exe", chrome: "chrome.exe",
+        firefox: "firefox.exe", vlc: "vlc.exe", wordpad: "wordpad.exe",
+        excel: "excel.exe", word: "winword.exe",
+        "visual studio": "devenv.exe", vscode: "code.exe", "vs code": "code.exe",
+        "visual studio code": "code.exe", rider: "rider64.exe",
+        "unity hub": "Unity Hub.exe", unity: "Unity.exe",
+        dotnet: "dotnet.exe", "dotnet studio": "dotnet.exe",
+    };
+    const isFullPath = appName.includes("\\") || appName.includes("/") || /^[a-zA-Z]:/.test(appName);
+    const alreadyExe = appName.toLowerCase().endsWith(".exe");
+    const exe = isFullPath ? appName : (appMap[appName.toLowerCase()] || (alreadyExe ? appName : `${appName}.exe`));
+    return new Promise((resolve, reject) => {
+        (0, child_process_1.execFile)("cmd.exe", ["/c", "start", "", exe], (err) => {
+            if (err) {
+                reject(new Error(`Failed to launch ${appName}: ${err.message}`));
+            }
+        });
+        setTimeout(async () => {
+            if (typeText) {
+                const escaped = typeText.replace(/'/g, "''").replace(/`/g, "``");
+                const ps = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${escaped}')`;
+                const psChild = (0, child_process_1.spawn)("powershell.exe", ["-Command", ps], { detached: true, stdio: "ignore", shell: false });
+                psChild.unref();
+                resolve(`Opened ${appName} and typed: "${typeText}"`);
+            }
+            else {
+                resolve(`Opened ${appName}!`);
+            }
+        }, 1500);
+    });
+}
+const SCREEN_W = 1600;
+const SCREEN_H = 900;
+const GRID_COLS = 16;
+const GRID_ROWS = 9;
+const CELL_W = SCREEN_W / GRID_COLS;
+const CELL_H = SCREEN_H / GRID_ROWS;
+async function captureGridScreenshot(outputPath) {
+    const screenshotPath = outputPath.replace(".png", "_raw.png");
+    const escapedPath = screenshotPath.replace(/\\/g, "\\\\");
+    await new Promise((resolve, reject) => {
+        const ps = `Add-Type -AssemblyName System.Windows.Forms; $s = [System.Windows.Forms.Screen]::PrimaryScreen; $bmp = New-Object System.Drawing.Bitmap($s.Bounds.Width, $s.Bounds.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($s.Bounds.Location, [System.Drawing.Point]::Empty, $s.Bounds.Size); $bmp.Save('${escapedPath}'); $g.Dispose(); $bmp.Dispose()`;
+        const child = (0, child_process_1.spawn)("powershell.exe", ["-Command", ps], { stdio: "pipe" });
+        child.on("close", (code) => code === 0 ? resolve() : reject(new Error("Screenshot failed code " + code)));
+        child.on("error", reject);
+    });
+    const { Jimp } = require("jimp");
+    const img = await Jimp.read(screenshotPath);
+    const GRID_COLOR = 0xff0000ff;
+    const TEXT_COLOR = 0xffffffff;
+    for (let col = 0; col <= GRID_COLS; col++) {
+        const px = Math.round(col * CELL_W);
+        for (let py = 0; py < SCREEN_H; py++) {
+            if (px < SCREEN_W)
+                img.setPixelColor(GRID_COLOR, px, py);
+            if (px + 1 < SCREEN_W)
+                img.setPixelColor(GRID_COLOR, px + 1, py);
+        }
+    }
+    for (let row = 0; row <= GRID_ROWS; row++) {
+        const py = Math.round(row * CELL_H);
+        for (let px = 0; px < SCREEN_H; px++) {
+            if (py < SCREEN_H)
+                img.setPixelColor(GRID_COLOR, py, px);
+            if (py + 1 < SCREEN_H)
+                img.setPixelColor(GRID_COLOR, py + 1, px);
+        }
+    }
+    const fontMaps = {
+        A: [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0]],
+        B: [[1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 0, 0]],
+        C: [[0, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [0, 1, 1, 1, 0]],
+        D: [[1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 0, 0]],
+        E: [[1, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 1, 0]],
+        F: [[1, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0]],
+        G: [[0, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 1, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 1, 0]],
+        H: [[1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0]],
+        I: [[1, 1, 1, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [1, 1, 1, 0, 0]],
+        J: [[0, 0, 1, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]],
+        K: [[1, 0, 0, 1, 0], [1, 0, 1, 0, 0], [1, 1, 0, 0, 0], [1, 1, 0, 0, 0], [1, 0, 1, 0, 0], [1, 0, 1, 0, 0], [1, 0, 0, 1, 0]],
+        L: [[1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 1, 0]],
+        M: [[1, 0, 0, 0, 1], [1, 1, 0, 1, 1], [1, 0, 1, 0, 1], [1, 0, 1, 0, 1], [1, 0, 0, 0, 1], [1, 0, 0, 0, 1], [1, 0, 0, 0, 1]],
+        N: [[1, 0, 0, 0, 1], [1, 1, 0, 0, 1], [1, 0, 1, 0, 1], [1, 0, 1, 0, 1], [1, 0, 0, 1, 1], [1, 0, 0, 0, 1], [1, 0, 0, 0, 1]],
+        O: [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]],
+        P: [[1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0]],
+        "1": [[0, 1, 0, 0, 0], [1, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [1, 1, 1, 0, 0]],
+        "2": [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 0, 1, 0, 0], [0, 1, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 1, 0]],
+        "3": [[1, 1, 1, 0, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 1, 1, 0, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [1, 1, 1, 0, 0]],
+        "4": [[1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0]],
+        "5": [[1, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 1, 1, 0, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [1, 0, 1, 0, 0], [0, 1, 1, 0, 0]],
+        "6": [[0, 1, 1, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]],
+        "7": [[1, 1, 1, 1, 0], [0, 0, 0, 1, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0]],
+        "8": [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]],
+        "9": [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 1, 0], [0, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]]
+    };
+    const drawPixelChar = (char, startX, startY) => {
+        const matrix = fontMaps[char];
+        if (!matrix)
+            return;
+        for (let r = 0; r < matrix.length; r++) {
+            for (let c = 0; c < matrix[r].length; c++) {
+                if (matrix[r][c] === 1) {
+                    const targetX = startX + (c * 2);
+                    const targetY = startY + (r * 2);
+                    for (let sx = 0; sx < 2; sx++) {
+                        for (let sy = 0; sy < 2; sy++) {
+                            if (targetX + sx < SCREEN_W && targetY + sy < SCREEN_H) {
+                                img.setPixelColor(TEXT_COLOR, targetX + sx, targetY + sy);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    const columns = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"];
+    for (let row = 0; row < GRID_ROWS; row++) {
+        for (let col = 0; col < GRID_COLS; col++) {
+            const cellX = Math.round(col * CELL_W);
+            const cellY = Math.round(row * CELL_H);
+            const letter = columns[col];
+            const numberStr = String(row + 1);
+            drawPixelChar(letter, cellX + 10, cellY + 10);
+            drawPixelChar(numberStr, cellX + 24, cellY + 10);
+        }
+    }
+    await img.write(outputPath);
+    try {
+        fs.unlinkSync(screenshotPath);
+    }
+    catch { }
+}
+async function registerSlashCommands(clientId, token) {
+    const guildCommands = [
+        new discord_js_1.SlashCommandBuilder().setName("grid").setDescription("Screenshot your screen with a grid overlay").toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("send-dm")
+            .setDescription("Send a direct message to a user via the bot")
+            .addStringOption(option => option.setName("user_id").setDescription("The Discord ID of the user").setRequired(true))
+            .addStringOption(option => option.setName("message").setDescription("The message you want to send").setRequired(true))
+            .setDMPermission(false)
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder().setName("health-check").setDescription("Check the bot's health and status").toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("ask")
+            .setDescription("Ask the AI anything or send a command")
+            .addStringOption(option => option.setName("prompt").setDescription("Your question or command for the AI").setRequired(true))
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder().setName("yobnh-member").setDescription("Verify a yobnh member").toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("update-channel")
+            .setDescription("Set a channel to receive latest commit updates from the repo")
+            .addChannelOption(option => option.setName("channel").setDescription("The channel to post commit updates to").setRequired(true))
+            .setDMPermission(false)
+            .toJSON()
+    ];
+    const rest = new discord_js_1.REST({ version: "10" }).setToken(token);
+    try {
+        console.log("Synchronizing slash command arrays...");
+        await rest.put(discord_js_1.Routes.applicationCommands(clientId), { body: guildCommands });
+        console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel");
+    }
+    catch (error) {
+        console.error("Failed to register slash commands:", error);
+    }
+}
+discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
+    if (!interaction.isChatInputCommand())
+        return;
+    if (isBlacklisted(interaction.user.id)) {
+        interaction.reply({ content: "Sorry but you are blacklisted from AuroraSphinx.", ephemeral: true });
+        return;
+    }
+    if (interaction.commandName === "grid") {
+        setImmediate(async () => {
+            try {
+                await interaction.deferReply();
+            }
+            catch (deferError) {
+                if (deferError?.code !== 10062) {
+                    console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
+                    return;
+                }
+            }
+            const outputPath = path.join(process.cwd(), "grid_screenshot.png");
+            try {
+                await captureGridScreenshot(outputPath);
+                const attachment = new discord_js_1.AttachmentBuilder(outputPath, { name: "grid.png" });
+                await interaction.editReply({
+                    content: "Here is your screen with a grid overlay! Cells are labeled A1-P9. Tell me a coordinate to click!",
+                    files: [attachment],
+                });
+                setTimeout(() => { try {
+                    if (fs.existsSync(outputPath))
+                        fs.unlinkSync(outputPath);
+                }
+                catch { } }, 5000);
+            }
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.error("Grid screenshot collection or upload failed:", err);
+                try {
+                    await interaction.editReply(`Screenshot failed: ${msg}`);
+                }
+                catch { }
+            }
+        });
+    }
+    if (interaction.commandName === "send-dm") {
+        setImmediate(async () => {
+            if (!interaction.memberPermissions?.has('Administrator')) {
+                await interaction.reply({ content: "❌ You do not have permission to use this command.", ephemeral: true });
+                return;
+            }
+            const targetId = interaction.options.getString("user_id", true).trim();
+            const messageContent = interaction.options.getString("message", true).trim();
+            if (isSpamming(targetId)) {
+                await interaction.reply({
+                    content: "⚠️ **Rate limit reached!** You are sending too many messages to this user ID right now.",
+                    ephemeral: true
+                });
+                return;
+            }
+            try {
+                await interaction.deferReply({ ephemeral: true });
+            }
+            catch (deferError) {
+                return;
+            }
+            try {
+                const targetUser = await discord.users.fetch(targetId, { force: true });
+                const dmChannel = await targetUser.createDM();
+                await dmChannel.send(messageContent);
+                await interaction.editReply({ content: `✅ Successfully sent direct message to **${targetUser.tag}**!` });
+            }
+            catch (error) {
+                console.error("Slash DM Command Error:", error);
+                await interaction.editReply({
+                    content: `❌ **Delivery Failed.** This user may have their DMs locked down, or the User ID is invalid.`
+                });
+            }
+        });
+    }
+    if (interaction.commandName === "health-check") {
+        setImmediate(async () => {
+            try {
+                await interaction.deferReply();
+            }
+            catch (deferError) {
+                if (deferError?.code !== 10062) {
+                    console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
+                    return;
+                }
+            }
+            try {
+                const stats = await (0, pidusage_1.default)(process.pid);
+                const totalMem = os.totalmem();
+                const memUsedPercent = Math.round((stats.memory / totalMem) * 100);
+                const cpuPercent = Math.round(stats.cpu);
+                const memUsedMB = Math.round(stats.memory / 1024 / 1024);
+                const memTotalMB = Math.round(totalMem / 1024 / 1024);
+                const uptimeMs = process.uptime() * 1000;
+                const uptimeDays = Math.floor(uptimeMs / 86400000);
+                const uptimeHours = Math.floor((uptimeMs % 86400000) / 3600000);
+                const uptimeMinutes = Math.floor((uptimeMs % 3600000) / 60000);
+                const uptimeStr = uptimeDays > 0
+                    ? `${uptimeDays}d ${uptimeHours}h ${uptimeMinutes}m`
+                    : uptimeHours > 0
+                        ? `${uptimeHours}h ${uptimeMinutes}m`
+                        : `${uptimeMinutes}m`;
+                const guildCount = discord.guilds.cache.size;
+                const userCount = discord.users.cache.size;
+                const pingLatency = discord.ws.ping;
+                const conversationCount = conversations.size;
+                let healthScore = 0;
+                if (cpuPercent < 30)
+                    healthScore += 2;
+                else if (cpuPercent < 60)
+                    healthScore += 1;
+                if (memUsedPercent < 50)
+                    healthScore += 2;
+                else if (memUsedPercent < 75)
+                    healthScore += 1;
+                if (pingLatency < 100)
+                    healthScore += 2;
+                else if (pingLatency < 250)
+                    healthScore += 1;
+                if (!isThrottled)
+                    healthScore += 1;
+                let healthStatus;
+                let healthColor;
+                if (healthScore >= 7) {
+                    healthStatus = "Great";
+                    healthColor = 0x00e676;
+                }
+                else if (healthScore >= 5) {
+                    healthStatus = "Good";
+                    healthColor = 0x66bb6a;
+                }
+                else if (healthScore >= 3) {
+                    healthStatus = "Mid";
+                    healthColor = 0xffa726;
+                }
+                else {
+                    healthStatus = "Bad";
+                    healthColor = 0xef5350;
+                }
+                const statusIcon = isThrottled ? "Throttled" : "Normal";
+                const embed = new discord_js_1.EmbedBuilder()
+                    .setTitle("Bot Health Check")
+                    .setColor(healthColor)
+                    .addFields({ name: "Status", value: `**${healthStatus}**`, inline: true }, { name: "Uptime", value: uptimeStr, inline: true }, { name: "Ping", value: `${pingLatency}ms`, inline: true }, { name: "CPU Usage", value: `${cpuPercent}%`, inline: true }, { name: "Memory Usage", value: `${memUsedPercent}% (${memUsedMB}/${memTotalMB} MB)`, inline: true }, { name: "Run Mode", value: RUNNING_MODE.toUpperCase(), inline: true }, { name: "Throttle State", value: statusIcon, inline: true }, { name: "Guilds", value: `${guildCount}`, inline: true }, { name: "Cached Users", value: `${userCount}`, inline: true }, { name: "Active Conversations", value: `${conversationCount}`, inline: true }, { name: "Model", value: `\`${RESPONSE_MODEL || "N/A"}\``, inline: false })
+                    .setFooter({ text: `Health Score: ${healthScore}/8` })
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [embed] });
+            }
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.error("Health check failed:", err);
+                try {
+                    await interaction.editReply(`Health check failed: ${msg}`);
+                }
+                catch { }
+            }
+        });
+    }
+    if (interaction.commandName === "ask") {
+        setImmediate(async () => {
+            const prompt = interaction.options.getString("prompt", true).trim();
+            try {
+                await interaction.deferReply();
+            }
+            catch (deferError) {
+                if (deferError?.code !== 10062) {
+                    console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
+                    return;
+                }
+            }
+            try {
+                const askFn = global.askAI;
+                if (!askFn) {
+                    await interaction.editReply("AI system is not initialized yet.");
+                    return;
+                }
+                const reply = await askFn(prompt);
+                const chunks = splitMessage(reply, 2000);
+                await interaction.editReply(chunks[0]);
+                for (let i = 1; i < chunks.length; i++) {
+                    await interaction.followUp(chunks[i]);
+                }
+            }
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.error("Ask command failed:", err);
+                try {
+                    await interaction.editReply(`Ask failed: ${msg}`);
+                }
+                catch { }
+            }
+        });
+    }
+    if (interaction.commandName === "yobnh-member") {
+        interaction.reply("YOBNH SHOULD BE VERIFIED NOW");
+    }
+    if (interaction.commandName === "update-channel") {
+        setImmediate(async () => {
+            if (!interaction.memberPermissions?.has('Administrator')) {
+                await interaction.reply({ content: "❌ You do not have permission to use this command.", ephemeral: true });
+                return;
+            }
+            try {
+                await interaction.deferReply();
+            }
+            catch (deferError) {
+                if (deferError?.code !== 10062) {
+                    console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
+                    return;
+                }
+            }
+            const targetChannel = interaction.options.getChannel("channel", true);
+            if (!GITHUB_TOKEN) {
+                const failEmbed = new discord_js_1.EmbedBuilder()
+                    .setColor(0xED4245)
+                    .setTitle("❌ Commit Fetch Failed")
+                    .setDescription("No `GITHUB_TOKEN` environment variable is set. Cannot access the private repository.")
+                    .setTimestamp();
+                await interaction.editReply({ embeds: [failEmbed] });
+                return;
+            }
+            try {
+                const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=10`;
+                const resp = await fetch(apiUrl, {
+                    headers: {
+                        Authorization: `Bearer ${GITHUB_TOKEN}`,
+                        Accept: "application/vnd.github+json",
+                        "User-Agent": "yobnh-bot",
+                    },
+                });
+                if (!resp.ok) {
+                    const body = await resp.text();
+                    const failEmbed = new discord_js_1.EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle("❌ Commit Fetch Failed")
+                        .setDescription(`GitHub API returned \`${resp.status}\`:\n\`\`\`${body.slice(0, 500)}\`\`\``)
+                        .setTimestamp();
+                    await interaction.editReply({ embeds: [failEmbed] });
+                    return;
+                }
+                const commits = await resp.json();
+                if (!commits.length) {
+                    const failEmbed = new discord_js_1.EmbedBuilder()
+                        .setColor(0xED4245)
+                        .setTitle("❌ No Commits Found")
+                        .setDescription("The repository returned zero commits.")
+                        .setTimestamp();
+                    await interaction.editReply({ embeds: [failEmbed] });
+                    return;
+                }
+                const fields = commits.map((c) => ({
+                    name: `\`${c.sha.slice(0, 7)}\``,
+                    value: c.commit.message.split("\n")[0],
+                    inline: false,
+                }));
+                const successEmbed = new discord_js_1.EmbedBuilder()
+                    .setColor(0x57F287)
+                    .setTitle("✅ Latest Commits — Update Channel")
+                    .setDescription(`Fetched **${commits.length}** commit(s) from \`${GITHUB_REPO}\``)
+                    .addFields(fields)
+                    .setFooter({ text: `Repo: ${GITHUB_REPO}` })
+                    .setTimestamp();
+                const target = discord.channels.cache.get(targetChannel.id);
+                if (!target || !("send" in target)) {
+                    await interaction.editReply({ content: "❌ Could not access the specified channel." });
+                    return;
+                }
+                await target.send({ embeds: [successEmbed] });
+                await interaction.editReply({ content: `✅ Commit updates posted to <#${targetChannel.id}>` });
+            }
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                const failEmbed = new discord_js_1.EmbedBuilder()
+                    .setColor(0xED4245)
+                    .setTitle("❌ Commit Fetch Failed")
+                    .setDescription(`\`\`\`${msg}\`\`\``)
+                    .setTimestamp();
+                try {
+                    await interaction.editReply({ embeds: [failEmbed] });
+                }
+                catch { }
+            }
+        });
+    }
+});
+discord.once(discord_js_1.Events.ClientReady, async (client) => {
     console.log(`? Logged in as ${client.user.tag}`);
     console.log(`?? Bot ready. Guilds: ${client.guilds.cache.size}`);
+    try {
+        await registerSlashCommands(client.user.id, DISCORD_TOKEN);
+    }
+    catch (err) {
+        console.error("Failed to register slash commands:", err);
+    }
 });
+async function executeSingleAction(parsed, channel, userId, channelId) {
+    if (parsed?.action === "mouse_move" && parsed.x !== undefined && parsed.y !== undefined) {
+        try {
+            const result = await moveMouse(Number(parsed.x), Number(parsed.y));
+            await channel.send(`鼠标移动: ${result}`);
+            addToHistory(channelId, userId, "assistant", result);
+        }
+        catch (err) {
+            await channel.send(`⚠️ Mouse move failed: ${err instanceof Error ? err.message : String(err)}`);
+            addToHistory(channelId, userId, "assistant", `Error executing mouse_move: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+    if (parsed?.action === "mouse_click" && parsed.x !== undefined && parsed.y !== undefined) {
+        try {
+            const btn = parsed.button === "right" ? "right" : "left";
+            const result = await clickMouse(Number(parsed.x), Number(parsed.y), btn);
+            await channel.send(`鼠标点击: ${result}`);
+            addToHistory(channelId, userId, "assistant", result);
+        }
+        catch (err) {
+            await channel.send(`⚠️ Mouse click failed: ${err instanceof Error ? err.message : String(err)}`);
+            addToHistory(channelId, userId, "assistant", `Error executing mouse_click: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+    if (parsed?.action === "launch" && parsed.app) {
+        try {
+            const result = await launchApp(String(parsed.app), parsed.type ? String(parsed.type) : undefined);
+            await channel.send(`🖥️ ${result}`);
+            addToHistory(channelId, userId, "assistant", result);
+        }
+        catch (err) {
+            await channel.send(`⚠️ Launch failed: ${err instanceof Error ? err.message : String(err)}`);
+            addToHistory(channelId, userId, "assistant", `Error launching app: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+    if (parsed?.action === "kick" && parsed.user) {
+        const userQuery = String(parsed.user);
+        const reason = parsed.reason || "No explicit reason provided.";
+        if (channel.guild && !channel.guild.members.me?.permissions.has(discord_js_1.PermissionsBitField.Flags.KickMembers)) {
+            const permErr = "Aborted: I do not possess Kick Members permissions in this guild layout setup.";
+            await channel.send(`❌ ${permErr}`);
+            addToHistory(channelId, userId, "assistant", permErr);
+            return;
+        }
+        await channel.send(`kick ${userQuery}...`);
+        try {
+            const member = channel.guild?.members.cache.get(userQuery) || channel.guild?.members.cache.find((m) => m.user.username.toLowerCase() === userQuery.toLowerCase());
+            if (!member)
+                throw new Error("User was not found in the target server cache framework workspace.");
+            await member.kick(reason);
+            await channel.send(`Kicked ${member.user.username}!`);
+            addToHistory(channelId, userId, "assistant", `Successfully kicked user ${member.user.username}`);
+        }
+        catch (err) {
+            await channel.send(`❌ Kick Action execution aborted: ${err.message}`);
+            addToHistory(channelId, userId, "assistant", `Failed to kick user: ${err.message}`);
+        }
+    }
+    if (parsed?.action === "timeout" && parsed.user) {
+        const userQuery = String(parsed.user);
+        const durationSec = Number(parsed.duration || 600);
+        const reason = parsed.reason || "No explicit reason provided.";
+        if (channel.guild && !channel.guild.members.me?.permissions.has(discord_js_1.PermissionsBitField.Flags.ModerateMembers)) {
+            const permErr = "Aborted: I do not possess Moderate Members (Timeout) permissions in this guild layout setup.";
+            await channel.send(`❌ ${permErr}`);
+            addToHistory(channelId, userId, "assistant", permErr);
+            return;
+        }
+        await channel.send(`timeout ${userQuery}...`);
+        try {
+            const member = channel.guild?.members.cache.get(userQuery) || channel.guild?.members.cache.find((m) => m.user.username.toLowerCase() === userQuery.toLowerCase());
+            if (!member)
+                throw new Error("User was not found in the target server cache framework workspace.");
+            await member.timeout(durationSec * 1000, reason);
+            await channel.send(`Timeouted ${member.user.username}!`);
+            addToHistory(channelId, userId, "assistant", `Timeouted user ${member.user.username} for ${durationSec} seconds.`);
+        }
+        catch (err) {
+            await channel.send(`❌ Timeout Action execution aborted: ${err.message}`);
+            addToHistory(channelId, userId, "assistant", `Failed to timeout user: ${err.message}`);
+        }
+    }
+    // --- Untimeout Implementation ---
+    if (parsed?.action === "untimeout" && parsed.user) {
+        const userQuery = String(parsed.user).trim();
+        const reason = parsed.reason || "No explicit reason provided.";
+        if (channel.guild && !channel.guild.members.me?.permissions.has(discord_js_1.PermissionsBitField.Flags.ModerateMembers)) {
+            const permErr = "Aborted: I do not possess Moderate Members permissions to remove timeout.";
+            await channel.send(`❌ ${permErr}`);
+            addToHistory(channelId, userId, "assistant", permErr);
+            return;
+        }
+        try {
+            const member = channel.guild?.members.cache.get(userQuery) || channel.guild?.members.cache.find((m) => m.user.username.toLowerCase() === userQuery.toLowerCase() || m.user.id === userQuery);
+            if (!member)
+                throw new Error("User was not found in the target server cache framework workspace.");
+            await member.timeout(null, reason);
+            await channel.send(`✅ Successfully removed timeout for **${member.user.username}**!`);
+            addToHistory(channelId, userId, "assistant", `Successfully removed timeout for user ${member.user.username}.`);
+        }
+        catch (err) {
+            await channel.send(`❌ Untimeout Action execution aborted: ${err.message}`);
+            addToHistory(channelId, userId, "assistant", `Failed to remove timeout: ${err.message}`);
+        }
+    }
+    if (parsed?.action === "ban" && parsed.user) {
+        const userQuery = String(parsed.user).trim();
+        const reason = parsed.reason || "No explicit reason provided.";
+        if (channel.guild && !channel.guild.members.me?.permissions.has(discord_js_1.PermissionsBitField.Flags.BanMembers)) {
+            const permErr = "Aborted: I do not possess Ban Members permissions in this guild setup.";
+            const errEmbed = new discord_js_1.EmbedBuilder()
+                .setColor(0xED4245)
+                .setDescription(`❌ ${permErr}`);
+            await channel.send({ embeds: [errEmbed] });
+            addToHistory(channelId, userId, "assistant", permErr);
+            return;
+        }
+        // Phase 1: Post initial loading status message update
+        const loadingEmbed = new discord_js_1.EmbedBuilder()
+            .setColor(0xFEE75C)
+            .setDescription(`⏳ **Banning** \`${userQuery}\`...\n\n*making actions*`);
+        const statusMessage = await channel.send({ embeds: [loadingEmbed] });
+        try {
+            // Look up target member or resolve directly from user object configurations
+            const member = channel.guild?.members.cache.get(userQuery) || channel.guild?.members.cache.find((m) => m.user.username.toLowerCase() === userQuery.toLowerCase() || m.user.id === userQuery);
+            let targetUserObj = null;
+            if (member) {
+                targetUserObj = member.user;
+                if (!member.bannable)
+                    throw new Error("This member has a higher role hierarchy or permissions rank than me.");
+                await member.ban({ reason });
+            }
+            else {
+                targetUserObj = await discord.users.fetch(userQuery).catch(() => null);
+                await channel.guild?.members.ban(userQuery, { reason });
+            }
+            // Add dramatic processing delay space layout simulation
+            await new Promise(resolve => setTimeout(resolve, 1200));
+            const targetTag = targetUserObj ? targetUserObj.tag : userQuery;
+            const targetId = targetUserObj ? targetUserObj.id : userQuery;
+            const pfpUrl = targetUserObj ? targetUserObj.displayAvatarURL({ size: 256 }) : discord.user?.displayAvatarURL();
+            // Phase 2: Success state display block complete with user avatar attachment mapping
+            const successEmbed = new discord_js_1.EmbedBuilder()
+                .setColor(0xED4245)
+                .setTitle('🔨 Ban Confirmation Logged')
+                .setDescription(`**Banned!** \`${targetTag}\``)
+                .setThumbnail(pfpUrl)
+                .addFields({ name: '👤 Target ID', value: `\`${targetId}\``, inline: true }, { name: '📝 Reason Given', value: `\`\`\`${reason}\`\`\`` })
+                .setTimestamp();
+            await statusMessage.edit({ embeds: [successEmbed] });
+            addToHistory(channelId, userId, "assistant", `Successfully banned user: ${targetTag} (${targetId})`);
+        }
+        catch (err) {
+            const failEmbed = new discord_js_1.EmbedBuilder()
+                .setColor(0xED4245)
+                .setDescription(`❌ **Ban Action execution aborted:** ${err.message}`);
+            await statusMessage.edit({ embeds: [failEmbed] });
+            addToHistory(channelId, userId, "assistant", `Failed to ban target: ${err.message}`);
+        }
+    }
+    // --- Embed-based Unban Implementation ---
+    if (parsed?.action === "unban" && parsed.user) {
+        const userQuery = String(parsed.user).trim();
+        const reason = parsed.reason || "No explicit reason provided.";
+        if (channel.guild && !channel.guild.members.me?.permissions.has(discord_js_1.PermissionsBitField.Flags.BanMembers)) {
+            const permErr = "Aborted: I do not possess Ban Members permissions to process unban request.";
+            const errEmbed = new discord_js_1.EmbedBuilder().setColor(0xED4245).setDescription(`❌ ${permErr}`);
+            await channel.send({ embeds: [errEmbed] });
+            addToHistory(channelId, userId, "assistant", permErr);
+            return;
+        }
+        const loadingEmbed = new discord_js_1.EmbedBuilder()
+            .setColor(0xFEE75C)
+            .setDescription(`⏳ **Unbanning** \`${userQuery}\`...`);
+        const statusMessage = await channel.send({ embeds: [loadingEmbed] });
+        try {
+            await channel.guild?.members.unban(userQuery, reason);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            const successEmbed = new discord_js_1.EmbedBuilder()
+                .setColor(0x57F287)
+                .setTitle('🕊️ Unban Confirmation Logged')
+                .setDescription(`**Unbanned User ID:** \`${userQuery}\``)
+                .addFields({ name: '📝 Reason Given', value: `\`\`\`${reason}\`\`\`` })
+                .setTimestamp();
+            await statusMessage.edit({ embeds: [successEmbed] });
+            addToHistory(channelId, userId, "assistant", `Successfully unbanned user ID: ${userQuery}`);
+        }
+        catch (err) {
+            const failEmbed = new discord_js_1.EmbedBuilder()
+                .setColor(0xED4245)
+                .setDescription(`❌ **Unban Action execution aborted:** ${err.message}`);
+            await statusMessage.edit({ embeds: [failEmbed] });
+            addToHistory(channelId, userId, "assistant", `Failed to unban user ID ${userQuery}: ${err.message}`);
+        }
+    }
+}
 async function handleMessage(message) {
     if (message.author.bot)
         return;
+    if (isBlacklisted(message.author.id)) {
+        await message.reply("Sorry but you are blacklisted from AuroraSphinx.");
+        return;
+    }
+    if (isThrottled) {
+        await message.reply("⚠️ **Performance Safety Intercept:** The system load usage is currently too high right now! Cooling down... please wait a moment.");
+        return;
+    }
     const isDM = !message.guild;
     if (!isDM && (!discord.user || !message.mentions.has(discord.user)))
         return;
+    if (isSpamming(message.author.id)) {
+        return;
+    }
     const channel = message.channel;
     const userText = isDM ? message.content.trim() : message.content.replace(/<@!?(\d+)>/g, "").trim();
     if (!userText) {
@@ -506,51 +1437,19 @@ async function handleMessage(message) {
     const channelId = message.channel.id;
     const userId = message.author.id;
     addToHistory(channelId, userId, "user", userText);
-    let reply = await createChatResponse(getHistory(channelId, userId), SEARCH_MODEL, 256, 0.2);
+    let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 256, 0.4);
     let parsed = extractJsonFromText(reply);
-    if (!parsed && (likelyNeedsTool(userText) || looksLikeSearchRequest(userText))) {
-        const retryPrompt = `Your last answer did not use the browsing tool properly. If the user wants a search or to open a webpage, reply with only valid JSON and no extra text. Use one of these exact formats:\n` +
-            `{"action":"search","query":"..."}\n{"action":"open","url":"https://..."}`;
+    if (parsed) {
         addToHistory(channelId, userId, "assistant", reply);
-        addToHistory(channelId, userId, "user", retryPrompt);
-        reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 256, 0);
-        parsed = extractJsonFromText(reply);
-        // Fallback: if assistant still didn't return JSON, try to extract a URL or search query from its text
-        if (!parsed) {
-            const maybeUrl = extractUrlFromText(reply);
-            if (maybeUrl) {
-                parsed = { action: "open", url: maybeUrl };
-                debugLog("INFO", "Fallback extracted URL from assistant reply", { maybeUrl });
+        if (Array.isArray(parsed)) {
+            for (const item of parsed) {
+                await executeSingleAction(item, channel, userId, channelId);
             }
-            else {
-                const maybeQuery = extractSearchQueryFromText(reply) || (looksLikeSearchRequest(userText) ? userText : null);
-                if (maybeQuery) {
-                    parsed = { action: "search", query: maybeQuery };
-                    debugLog("INFO", "Fallback extracted search query from assistant reply", { maybeQuery });
-                }
-            }
+            return;
         }
-        if (!parsed && (likelyNeedsTool(userText) || looksLikeSearchRequest(userText))) {
-            const jsonOnlyPrompt = `I need you to reply with valid JSON only, and nothing else. Use one of these exact formats:\n` +
-                `{"action":"search","query":"..."}\n{"action":"open","url":"https://..."}`;
-            addToHistory(channelId, userId, "assistant", reply);
-            addToHistory(channelId, userId, "user", jsonOnlyPrompt);
-            reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 128, 0);
-            parsed = extractJsonFromText(reply);
-            if (!parsed) {
-                const maybeUrl = extractUrlFromText(reply);
-                if (maybeUrl) {
-                    parsed = { action: "open", url: maybeUrl };
-                    debugLog("INFO", "Fallback extracted URL from assistant reply after JSON retry", { maybeUrl });
-                }
-                else {
-                    const maybeQuery = extractSearchQueryFromText(reply) || (looksLikeSearchRequest(userText) ? userText : null);
-                    if (maybeQuery) {
-                        parsed = { action: "search", query: maybeQuery };
-                        debugLog("INFO", "Fallback extracted search query from assistant reply after JSON retry", { maybeQuery });
-                    }
-                }
-            }
+        else if (parsed.action === "mouse_move" || parsed.action === "mouse_click" || parsed.action === "launch" || parsed.action === "kick" || parsed.action === "timeout" || parsed.action === "untimeout" || parsed.action === "ban" || parsed.action === "unban") {
+            await executeSingleAction(parsed, channel, userId, channelId);
+            return;
         }
     }
     let browserData = null;
@@ -568,59 +1467,86 @@ async function handleMessage(message) {
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            console.error("searchGoogle failed:", err);
             await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
         }
     }
     else if (parsed?.action === "open" && parsed.url) {
         const rawUrl = String(parsed.url);
-        debugLog("INFO", "Assistant requested open", { rawUrl });
         const cleaned = sanitizeUrl(rawUrl);
         if (!cleaned) {
             await channel.send("⚠️ The assistant returned an invalid URL to open. Please provide a valid `https://...` URL.");
+        }
+        else if (/google\.com\/search/i.test(cleaned)) {
+            let googleQuery = userText;
+            try {
+                googleQuery = new URL(cleaned).searchParams.get("q") || userText;
+            }
+            catch { }
+            if (typeof channel.sendTyping === "function")
+                await channel.sendTyping();
+            try {
+                await channel.send(`🔎 Searching for: "${googleQuery}"...`);
+                const results = await searchGoogle(googleQuery);
+                browserData = results.length
+                    ? `Search results for "${googleQuery}":\n${results
+                        .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
+                        .join("\n\n")}`
+                    : `No Google results found for "${googleQuery}".`;
+            }
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+            }
+        }
+        else if (/^(https?:\/\/)?(www\.)?google\.com\/?$/i.test(cleaned)) {
+            if (typeof channel.sendTyping === "function")
+                await channel.sendTyping();
+            try {
+                await channel.send(`🔎 Searching for: "${userText}"...`);
+                const results = await searchGoogle(userText);
+                browserData = results.length
+                    ? `Search results for "${userText}":\n${results
+                        .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
+                        .join("\n\n")}`
+                    : `No Google results found for "${userText}".`;
+            }
+            catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+            }
         }
         else {
             let systemOpened = false;
             const flags = parseOpenFlags(userText);
             const useSystemBrowser = Boolean(flags.forceSystem && !flags.forceChromium);
-            const preferVisible = flags.forceHeadless ? false : true;
-            const viewportWidth = 1600;
-            const viewportHeight = 900;
+            const preferVisible = !flags.forceHeadless;
             if (useSystemBrowser) {
                 try {
                     await openWithSystem(cleaned);
                     systemOpened = true;
                     await channel.send(`🌐 Opened in your system default browser: ${cleaned}`);
                 }
-                catch (sysErr) {
-                    debugLog("WARN", "System opener failed, will try Playwright", { err: sysErr instanceof Error ? sysErr.message : String(sysErr) });
-                }
+                catch (sysErr) { }
             }
             if (typeof channel.sendTyping === "function")
                 await channel.sendTyping();
             try {
                 const mode = preferVisible ? "visible" : "headless";
                 await channel.send(`🌐 Launching Playwright Chromium for: ${cleaned} (${mode} mode)`);
-                const page = await browseUrl(cleaned, preferVisible, viewportWidth, viewportHeight);
+                const page = await browseUrl(cleaned, preferVisible, 1600, 900);
                 browserData = `Opened page: ${page.title}\nURL: ${page.url}\n\n${page.content}`;
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
-                console.error("browseUrl failed:", err);
                 if (!systemOpened) {
                     try {
                         await channel.send(`🌐 Playwright failed, trying visible browser window...`);
                         const page = await browseUrl(cleaned, true, 1600, 900);
                         browserData = `Opened page (visible): ${page.title}\nURL: ${page.url}\n\n${page.content}`;
-                        await channel.send("I opened the page in a visible browser window instead. Check the host display.");
                     }
                     catch (err2) {
-                        console.error("browseUrl failed (visible):", err2);
-                        await channel.send(`⚠️ I failed to open Playwright Chromium: ${msg}. Common fixes: run \`npx playwright install chromium\` and ensure the host has a display available.`);
+                        await channel.send(`⚠️ I failed to open Playwright Chromium: ${msg}.`);
                     }
-                }
-                else {
-                    await channel.send(`⚠️ I couldn't retrieve page contents, but the URL was opened in your system browser.`);
                 }
             }
         }
@@ -647,30 +1573,48 @@ discord.on(discord_js_1.Events.MessageCreate, async (message) => {
             msg: error instanceof Error ? error.message : String(error),
             trace: error instanceof Error ? error.stack?.split("\n")[1]?.trim() : "",
         };
-        fs_1.default.appendFileSync("bot-errors.log", `${JSON.stringify(errorPayload)}\n`);
+        fs.appendFileSync("bot-errors.log", `${JSON.stringify(errorPayload)}\n`);
         console.error(error);
         try {
             await message.reply("⚠️ Sorry, something went wrong. Please try again later.");
         }
-        catch {
-            // ignore reply errors
-        }
+        catch { }
     }
 });
-process.on("unhandledRejection", (reason) => {
-    console.error("Unhandled rejection:", reason);
-});
-process.on("uncaughtException", (error) => {
-    console.error("Uncaught exception:", error);
-});
-printStartupBanner();
-console.log("Starting Aurora bot...");
-createConsoleInterface();
-if (!DISCORD_TOKEN) {
-    console.error("Missing DISCORD_TOKEN environment variable.");
-    process.exit(1);
+process.on("unhandledRejection", (reason) => { console.error("Unhandled rejection:", reason); });
+process.on("uncaughtException", (error) => { console.error("Uncaught exception:", error); });
+async function main() {
+    const setupRl = readline_1.default.createInterface({ input: process.stdin, output: process.stdout });
+    console.log("----------------------------------------");
+    console.log("before starting yobnh...");
+    console.log("what mode do you want?");
+    console.log("1) gpu usage (High history context, large intelligence models)");
+    console.log("2) ram usage (Low memory footprint, small high-speed models)");
+    console.log("----------------------------------------");
+    const question = (query) => new Promise((resolve) => setupRl.question(query, resolve));
+    const choice = (await question("Select mode (1 or 2): ")).trim();
+    setupRl.close();
+    if (choice === "2") {
+        RUNNING_MODE = "ram";
+        MAX_HISTORY = 6;
+        RESPONSE_MODEL = process.env.RESPONSE_MODEL ?? (USE_MISTRAL ? "mistral-small-latest" : "gpt-4o-mini");
+    }
+    else {
+        RUNNING_MODE = "gpu";
+        MAX_HISTORY = 20;
+        RESPONSE_MODEL = process.env.RESPONSE_MODEL ?? (USE_MISTRAL ? "mistral-large-latest" : "gpt-4o");
+    }
+    printStartupBanner();
+    createConsoleInterface();
+    startHardwarePerformanceWatchdog();
+    loadBlacklist();
+    if (!DISCORD_TOKEN) {
+        console.error("Critical Error: DISCORD_TOKEN is missing from your environment setup.");
+        process.exit(1);
+    }
+    discord.login(DISCORD_TOKEN).catch((error) => {
+        console.error("Discord login failed:", error);
+        process.exit(1);
+    });
 }
-discord.login(DISCORD_TOKEN).catch((error) => {
-    console.error("Discord login failed:", error);
-    process.exit(1);
-});
+main();
