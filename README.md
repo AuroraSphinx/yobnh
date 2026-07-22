@@ -1,4 +1,4 @@
-# Aurora Bot (TypeScript)
+# YOBNH (TypeScript)
 
 A Discord AI assistant bot with browser search/open integration.
 
