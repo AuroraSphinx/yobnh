@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AuroraSphinx - Admin</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: Arial, sans-serif; font-size: 14px; background: #f0f0f0; color: #000; }
+
+  .topbar { background: #fff; border-bottom: 1px solid #ccc; padding: 6px 12px; display: flex; align-items: center; justify-content: space-between; }
+  .topbar-left .site-name { font-size: 24px; font-weight: bold; }
+  .topbar-left .tagline { font-size: 12px; color: #555; }
+  .topbar-right button { padding: 4px 12px; font-size: 13px; cursor: pointer; }
+
+  .nav { background: #ddd; border-bottom: 1px solid #bbb; padding: 4px 12px; font-size: 13px; }
+  .nav a { color: #00c; text-decoration: none; margin-right: 12px; }
+  .nav a:hover { text-decoration: underline; }
+
+  .uptime-bar { background: #e8e8e8; border-bottom: 1px solid #ccc; padding: 3px 12px; font-size: 11px; color: #555; display: flex; gap: 20px; align-items: center; }
+
+  .page-title { background: #e8e8e8; border-bottom: 2px solid #000; padding: 6px 12px; font-size: 20px; font-weight: bold; }
+
+  .content { padding: 12px; display: grid; grid-template-columns: 1fr; gap: 12px; }
+
+  .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+
+  .stat-box { background: #fff; border: 1px solid #bbb; padding: 10px; }
+  .stat-box .label { font-size: 11px; color: #555; text-transform: uppercase; margin-bottom: 4px; }
+  .stat-box .value { font-size: 22px; font-weight: bold; }
+  .stat-box .sub { font-size: 11px; color: #666; margin-top: 2px; }
+
+  .panel { background: #fff; border: 1px solid #bbb; }
+  .panel-title { background: #ddd; border-bottom: 1px solid #bbb; padding: 6px 10px; font-weight: bold; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+  .panel-title button { font-size: 11px; padding: 2px 8px; cursor: pointer; }
+
+  .console-out { background: #000; color: #0f0; font-family: monospace; font-size: 12px; height: 180px; overflow-y: auto; padding: 8px; line-height: 1.6; }
+  .console-input-row { display: flex; border-top: 1px solid #444; background: #000; }
+  .console-prompt { color: #0f0; font-family: monospace; font-size: 12px; padding: 6px 8px; white-space: nowrap; }
+  .console-input { flex: 1; background: #000; border: none; outline: none; color: #0f0; font-family: monospace; font-size: 12px; padding: 6px 0; }
+
+  .error-list { max-height: 300px; overflow-y: auto; }
+  .error-item { padding: 7px 10px; border-bottom: 1px solid #eee; font-size: 12px; }
+  .error-item:hover { background: #f9f9f9; }
+  .etype { font-weight: bold; font-size: 11px; margin-right: 6px; }
+  .etype-ERROR { color: red; }
+  .etype-WARN { color: #c80; }
+  .etype-INFO { color: #0077cc; }
+  .error-time { color: #888; font-size: 11px; }
+  .error-msg { margin-top: 2px; }
+  .error-trace { color: #888; font-size: 11px; font-family: monospace; }
+
+  .bot-online { color: green; font-weight: bold; }
+  .bot-offline { color: red; font-weight: bold; }
+
+  .log-viewer { background: #1a1a2e; color: #0f0; font-family: Consolas, monospace; font-size: 12px; height: 260px; overflow-y: auto; padding: 8px; line-height: 1.5; }
+  .log-viewer .log-line { white-space: pre-wrap; word-break: break-all; }
+  .log-viewer .log-stderr { color: #f55; }
+  .log-viewer .log-error { color: #f44; }
+  .log-viewer .log-warn { color: #ff0; }
+
+  .btn { padding: 5px 14px; border: none; font-weight: bold; cursor: pointer; font-size: 12px; }
+  .btn-start { background: #28a745; color: #fff; }
+  .btn-start:hover { background: #22863a; }
+  .btn-stop { background: #dc3545; color: #fff; }
+  .btn-stop:hover { background: #c82333; }
+  .btn-restart { background: #ffc107; color: #000; }
+  .btn-restart:hover { background: #e0a800; }
+
+  .crash-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center; align-items: center; }
+  .crash-box { background: #fff; border: 3px solid #dc3545; border-radius: 8px; padding: 24px 32px; max-width: 500px; text-align: center; }
+  .crash-box h2 { color: #dc3545; margin-bottom: 12px; font-size: 20px; }
+  .crash-box p { font-size: 13px; color: #333; margin-bottom: 8px; }
+  .crash-box .crash-reason { background: #f8d7da; border: 1px solid #f5c6cb; padding: 8px; font-family: monospace; font-size: 12px; color: #721c24; margin: 10px 0; text-align: left; max-height: 120px; overflow-y: auto; }
+  .crash-box .crash-btns { margin-top: 16px; display: flex; gap: 10px; justify-content: center; }
+
+  .footer { border: 1px solid #bbb; margin: 12px; padding: 20px; text-align: center; background: #fff; font-size: 12px; color: #555; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="site-name">AuroraSphinx</div>
+    <div class="tagline">all social media in one place.</div>
+  </div>
+  <div class="topbar-right">
+    <button onclick="logout()">Log out</button>
+  </div>
+</div>
+
+<div class="nav">
+  <a href="#">Videos</a>
+  <a href="#">Images</a>
+  <a href="#">Forums</a>
+  <a href="#">Storage</a>
+  <a href="#" style="color:purple;font-weight:bold">Admin</a>
+</div>
+
+<div class="uptime-bar">
+  <span>Server uptime: <span id="uptime-display">--</span></span>
+  <span>Bot: <span id="bot-status">checking...</span></span>
+  <span>Bot uptime: <b id="bot-uptime-display">N/A</b></span>
+  <span style="margin-left:auto; display:flex; gap:6px; align-items:center;">
+    <button class="btn btn-start" onclick="botStart()">Start</button>
+    <button class="btn btn-stop" onclick="botStop()">Stop</button>
+    <button class="btn btn-restart" onclick="botRestart()">Restart</button>
+  </span>
+</div>
+
+<div class="page-title">Admin Panel</div>
+
+<div class="content">
+  <div class="panel" style="margin-bottom: 4px;">
+  <div class="panel-title">Send Direct Message via Tobnh</div>
+  <div style="padding: 12px; display: flex; flex-direction: column; gap: 8px; background: #fff;">
+    <div style="display: flex; gap: 8px;">
+      <div style="flex: 1;">
+        <label style="font-size: 11px; font-weight: bold; color: #555; display: block; margin-bottom: 2px;">USER DISCORD ID</label>
+        <input type="text" id="dm-userid" placeholder="e.g. 1512933474414231552" style="width: 100%; padding: 6px; border: 1px solid #bbb; outline: none;" />
+      </div>
+    </div>
+    <div>
+      <label style="font-size: 11px; font-weight: bold; color: #555; display: block; margin-bottom: 2px;">MESSAGE TEXT CONTENT</label>
+      <textarea id="dm-message" placeholder="Type your message text context here..." style="width: 100%; height: 60px; padding: 6px; border: 1px solid #bbb; outline: none; resize: vertical; font-family: sans-serif;"></textarea>
+    </div>
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <span id="dm-status" style="font-size: 12px; font-weight: bold;"></span>
+      <button onclick="sendDirectMessage()" style="padding: 6px 16px; background: #0077cc; color: white; border: none; font-weight: bold; cursor: pointer;">Dispatch Message</button>
+    </div>
+  </div>
+</div>
+
+  <div class="panel" style="margin-bottom: 4px;">
+  <div class="panel-title">Ask AI Command</div>
+  <div style="padding: 12px; display: flex; flex-direction: column; gap: 8px; background: #fff;">
+    <div>
+      <label style="font-size: 11px; font-weight: bold; color: #555; display: block; margin-bottom: 2px;">PROMPT / COMMAND</label>
+      <textarea id="ask-prompt" placeholder="Type a prompt or command to send to the AI..." style="width: 100%; height: 60px; padding: 6px; border: 1px solid #bbb; outline: none; resize: vertical; font-family: sans-serif;" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();askAI();}"></textarea>
+    </div>
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <span id="ask-status" style="font-size: 12px; font-weight: bold;"></span>
+      <button onclick="askAI()" style="padding: 6px 16px; background: #7b2d8e; color: white; border: none; font-weight: bold; cursor: pointer;">Ask</button>
+    </div>
+    <div id="ask-reply-box" style="display:none; background:#f9f9f9; border:1px solid #ddd; padding:8px; font-size:12px; font-family:monospace; white-space:pre-wrap; max-height:200px; overflow-y:auto;"></div>
+  </div>
+</div>
+  <div class="stats-row">
+    <div class="stat-box">
+      <div class="label">CPU Usage</div>
+      <div class="value" id="cpu-val">--</div>
+      <div class="sub" id="cpu-sub">Loading...</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">Memory</div>
+      <div class="value" id="mem-val">--</div>
+      <div class="sub" id="mem-sub">Loading...</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">Discord Bot</div>
+      <div class="value" id="bot-val">--</div>
+      <div class="sub" id="bot-sub">checking...</div>
+    </div>
+    <div class="stat-box">
+      <div class="label">Errors (total)</div>
+      <div class="value" id="error-count" style="color:red">--</div>
+      <div class="sub">from bot log</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">
+      Bot Log Viewer
+      <div style="display:flex; gap:4px;">
+        <button onclick="toggleAutoScroll()">Auto-scroll</button>
+        <button onclick="clearLogs()">Clear</button>
+      </div>
+    </div>
+    <div class="log-viewer" id="log-viewer"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">
+      Live Console
+      <button onclick="clearConsole()">Clear</button>
+    </div>
+    <div class="console-out" id="console-body"></div>
+    <div class="console-input-row">
+      <span class="console-prompt">admin@aurora $</span>
+      <input class="console-input" id="console-input" placeholder="type a command..." onkeydown="handleCmd(event)" />
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">
+      Bot Error Log
+      <button onclick="fetchStats()">Refresh</button>
+    </div>
+    <div class="error-list" id="errors-body"><div style="padding:10px;color:#888">No errors logged yet.</div></div>
+  </div>
+
+</div>
+
+<div class="footer">
+  Copyright &copy; 2026 AuroraSphinx. All rights reserved.
+</div>
+
+<!-- Crash Window -->
+<div class="crash-overlay" id="crash-overlay">
+  <div class="crash-box">
+    <h2>Bot Crashed!</h2>
+    <p>The bot process has unexpectedly stopped.</p>
+    <div class="crash-reason" id="crash-reason"></div>
+    <div class="crash-btns">
+      <button class="btn btn-restart" onclick="botRestart(); hideCrash();">Restart Bot</button>
+      <button class="btn btn-start" onclick="botStart(); hideCrash();">Start Bot</button>
+      <button class="btn" style="background:#6c757d;color:#fff;" onclick="hideCrash();">Dismiss</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function logout() {
+  fetch("/", { headers: { Authorization: "Basic " + btoa("logout:logout") } }).catch(() => {});
+  setTimeout(() => location.reload(), 200);
+}
+
+// --- Bot Controls ---
+async function botStart() {
+  addLog("info", "Sending start command...");
+  try {
+    const res = await fetch("/api/bot/start", { method: "POST" });
+    const data = await res.json();
+    addLog(data.success ? "ok" : "warn", data.message);
+  } catch (e) { addLog("error", "Failed: " + e.message); }
+}
+
+async function botStop() {
+  addLog("warn", "Sending stop command...");
+  try {
+    const res = await fetch("/api/bot/stop", { method: "POST" });
+    const data = await res.json();
+    addLog(data.success ? "ok" : "warn", data.message);
+  } catch (e) { addLog("error", "Failed: " + e.message); }
+}
+
+async function botRestart() {
+  addLog("info", "Sending restart command...");
+  try {
+    const res = await fetch("/api/bot/restart", { method: "POST" });
+    const data = await res.json();
+    addLog("ok", data.message);
+  } catch (e) { addLog("error", "Failed: " + e.message); }
+}
+
+function hideCrash() {
+  document.getElementById("crash-overlay").style.display = "none";
+  fetch("/api/bot/crash-ack", { method: "POST" }).catch(() => {});
+}
+
+// --- Bot Status + Crash Detection ---
+let lastBotStatus = false;
+let logIndex = 0;
+let autoScroll = true;
+
+async function checkBotStatus() {
+  try {
+    const res = await fetch("/api/bot/status");
+    const data = await res.json();
+
+    document.getElementById("bot-uptime-display").textContent = data.uptime;
+
+    const wasOnline = lastBotStatus;
+    lastBotStatus = data.running;
+
+    document.getElementById("bot-val").textContent = data.running ? "Online" : "Offline";
+    document.getElementById("bot-val").style.color = data.running ? "green" : "red";
+    document.getElementById("bot-sub").textContent = data.running ? "process running" : "not running";
+    document.getElementById("bot-status").textContent = data.running ? "Online ✓" : "Offline ✗";
+    document.getElementById("bot-status").className = data.running ? "bot-online" : "bot-offline";
+
+    if (wasOnline && !data.running && data.crashed) {
+      document.getElementById("crash-reason").textContent = data.crashReason || "Unknown reason";
+      document.getElementById("crash-overlay").style.display = "flex";
+      addLog("error", "BOT CRASHED: " + (data.crashReason || "Unknown"));
+    }
+  } catch (e) {}
+}
+
+// --- Log Viewer ---
+async function fetchLogs() {
+  try {
+    const res = await fetch("/api/bot/logs?since=" + logIndex);
+    const data = await res.json();
+    if (data.logs && data.logs.length > 0) {
+      const viewer = document.getElementById("log-viewer");
+      for (const line of data.logs) {
+        const div = document.createElement("div");
+        div.className = "log-line";
+        if (line.includes("[STDERR]") || line.includes("Error")) div.className += " log-error";
+        else if (line.includes("WARN")) div.className += " log-warn";
+        div.textContent = line;
+        viewer.appendChild(div);
+      }
+      logIndex = data.total;
+      if (autoScroll) viewer.scrollTop = viewer.scrollHeight;
+    }
+  } catch (e) {}
+}
+
+function toggleAutoScroll() {
+  autoScroll = !autoScroll;
+  addLog("info", "Auto-scroll: " + (autoScroll ? "ON" : "OFF"));
+}
+
+function clearLogs() {
+  document.getElementById("log-viewer").innerHTML = "";
+  logIndex = 0;
+}
+
+// --- Ask AI ---
+async function askAI() {
+  const prompt = document.getElementById("ask-prompt").value.trim();
+  const statusEl = document.getElementById("ask-status");
+  const replyBox = document.getElementById("ask-reply-box");
+
+  if (!prompt) { statusEl.textContent = "Enter a prompt first."; statusEl.style.color = "red"; return; }
+
+  statusEl.textContent = "Thinking...";
+  statusEl.style.color = "#c80";
+  replyBox.style.display = "none";
+
+  try {
+    const res = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt })
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      statusEl.textContent = "Error: " + (data.error || "Request failed.");
+      statusEl.style.color = "red";
+      return;
+    }
+
+    statusEl.textContent = "Response received.";
+    statusEl.style.color = "green";
+    replyBox.textContent = data.reply;
+    replyBox.style.display = "block";
+    addLog("ok", "AI asked: \"" + prompt.slice(0, 60) + "\"");
+  } catch (e) {
+    statusEl.textContent = "Network error.";
+    statusEl.style.color = "red";
+  }
+}
+
+// --- DM ---
+async function sendDirectMessage() {
+  const userId = document.getElementById("dm-userid").value.trim();
+  const message = document.getElementById("dm-message").value.trim();
+  const statusEl = document.getElementById("dm-status");
+
+  if (!userId || !message) { statusEl.textContent = "Fill in both fields."; statusEl.style.color = "red"; return; }
+
+  statusEl.textContent = "Sending...";
+  statusEl.style.color = "#c80";
+
+  try {
+    const res = await fetch("/api/send-dm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, message })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      statusEl.textContent = "Error: " + (data.error || "Failed.");
+      statusEl.style.color = "red";
+      return;
+    }
+    statusEl.textContent = "Sent!";
+    statusEl.style.color = "green";
+    document.getElementById("dm-message").value = "";
+    addLog("ok", "DM sent to " + userId);
+  } catch (e) {
+    statusEl.textContent = "Network error.";
+    statusEl.style.color = "red";
+  }
+}
+
+// --- Stats ---
+async function fetchStats() {
+  try {
+    const res = await fetch("/api/stats");
+    if (!res.ok) return;
+    const data = await res.json();
+
+    document.getElementById("cpu-val").textContent = data.cpu + "%";
+    document.getElementById("cpu-sub").textContent = parseFloat(data.cpu) > 70 ? "High load!" : "Normal";
+    document.getElementById("mem-val").textContent = data.mem.percent + "%";
+    document.getElementById("mem-sub").textContent = data.mem.used + " GB / " + data.mem.total + " GB";
+    document.getElementById("uptime-display").textContent = data.uptime;
+
+    const errCount = data.errors.filter(e => e.type === "ERROR").length;
+    document.getElementById("error-count").textContent = errCount;
+
+    if (data.errors.length > 0) {
+      document.getElementById("errors-body").innerHTML = data.errors.map(e => `
+        <div class="error-item">
+          <span class="etype etype-${e.type}">${e.type}</span>
+          <span class="error-time">${e.time}</span>
+          <div class="error-msg">${e.msg}</div>
+          ${e.trace ? `<div class="error-trace">${e.trace}</div>` : ""}
+        </div>
+      `).join("");
+    } else {
+      document.getElementById("errors-body").innerHTML = '<div style="padding:10px;color:#888">No errors logged yet.</div>';
+    }
+  } catch (e) {}
+}
+
+// --- Live Console ---
+function now() { return new Date().toLocaleTimeString("en-US", { hour12: false }); }
+
+function addLog(level, msg) {
+  const body = document.getElementById("console-body");
+  const colors = { info: "#8df", ok: "#0f0", warn: "#ff0", error: "#f44" };
+  const line = document.createElement("div");
+  line.innerHTML = `<span style="color:#555">[${now()}]</span> <span style="color:${colors[level]||"#0f0"}">[${level.toUpperCase()}]</span> ${msg}`;
+  body.appendChild(line);
+  body.scrollTop = body.scrollHeight;
+}
+
+function clearConsole() { document.getElementById("console-body").innerHTML = ""; }
+
+const cmds = {
+  help: "Commands: help, status, clear, uptime, refresh, start, stop, restart",
+  status: () => `Bot: ${document.getElementById("bot-val").textContent} | CPU: ${document.getElementById("cpu-val").textContent} | Mem: ${document.getElementById("mem-val").textContent}`,
+  clear: () => { clearConsole(); return null; },
+  uptime: () => "Server uptime: " + document.getElementById("uptime-display").textContent,
+  refresh: () => { fetchStats(); return "Refreshing..."; },
+  start: () => { botStart(); return "Starting bot..."; },
+  stop: () => { botStop(); return "Stopping bot..."; },
+  restart: () => { botRestart(); return "Restarting bot..."; },
+};
+
+function handleCmd(e) {
+  if (e.key !== "Enter") return;
+  const input = document.getElementById("console-input");
+  const cmd = input.value.trim().toLowerCase();
+  input.value = "";
+  if (!cmd) return;
+  addLog("info", "$ " + cmd);
+  const res = cmds[cmd];
+  if (typeof res === "function") { const r = res(); if (r) addLog("ok", r); }
+  else if (res) addLog("ok", res);
+  else addLog("warn", `Unknown command: ${cmd}. Type 'help'.`);
+}
+
+addLog("ok", "Admin panel connected");
+fetchStats();
+checkBotStatus();
+fetchLogs();
+setInterval(fetchStats, 5000);
+setInterval(checkBotStatus, 3000);
+setInterval(fetchLogs, 2000);
+</script>
+</body>
+</html>

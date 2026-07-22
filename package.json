@@ -1,0 +1,28 @@
+{
+  "name": "discord-ai-bot",
+  "version": "1.0.0",
+  "description": "Discord AI bot powered by Claude",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:dev": "ts-node index.ts",
+    "admin": "node dist/server.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.26.4",
+    "jimp": "^1.6.1",
+    "nutjs": "^0.0.1",
+    "openai": "^4.104.0",
+    "pidusage": "^4.0.1",
+    "playwright": "^1.60.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^20.19.42",
+    "@types/pidusage": "^2.0.5",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.8.0"
+  }
+}
