@@ -28,6 +28,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY ?? "";
 const MISTRAL_BASE_URL = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai").replace(/\/$/, "");
 const USE_MISTRAL = Boolean(MISTRAL_API_KEY || MISTRAL_BASE_URL.includes("mistral"));
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
+const GITHUB_REPO = process.env.GITHUB_REPO ?? "AuroraSphinx/yobnh";
 const PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? null;
 const VERBOSE = process.env.VERBOSE === "true";
 
@@ -41,7 +43,7 @@ if (PLAYWRIGHT_BROWSERS_PATH) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = PLAYWRIGHT_BROWSERS_PATH;
 }
 
-const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too
+const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls
 
 RULES FOR TALKING:
 - If you are just chatting, answering a question directly, or hanging out, respond with REGULAR CONVERSATIONAL TEXT. Do not use JSON for normal talking.
@@ -70,6 +72,7 @@ IMPORTANT RULES:
 - if someone says yobnh then you must answer because thats shorten of your name
 - If the user asks you to search for information, reply ONLY with JSON.
 - Do not say "I need to search" or "let me look that up" in chat. Do not mention toolcalls or errors.
+- NEVER open google.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-Google websites only.
 - Do not mention Detg or say "aw shucks".
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 `;
@@ -501,11 +504,44 @@ async function searchGoogle(query: string): Promise<SearchResult[]> {
   let browser: Browser | null = null;
   try {
     debugLog("INFO", "Starting Google search", { query });
-    browser = await chromium.launch({ headless: true, timeout: 30000 });
-    const page = await browser.newPage();
+    browser = await chromium.launch({
+      headless: false,
+      timeout: 30000,
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+      ],
+    });
+    const context = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      viewport: { width: 1280, height: 800 },
+      locale: "en-US",
+    });
+    const page = await context.newPage();
+
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
+    });
+
     const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-    const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    const response = await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
     debugLog("INFO", "Google page loaded", { status: response?.status() });
+
+    const isCaptcha = await page.evaluate(() => {
+      return document.body.innerText.includes("unusual traffic") ||
+             document.body.innerText.includes("not a robot") ||
+             document.body.innerText.includes("captcha") ||
+             !!document.querySelector("form[action*='sorry']") ||
+             !!document.querySelector("#recaptcha");
+    });
+
+    if (isCaptcha) {
+      debugLog("WARN", "Google bot verification detected, waiting for manual solve");
+      await page.waitForNavigation({ timeout: 120000 }).catch(() => {});
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     const results = await page.evaluate(() => {
       const items: Array<{ title: string; snippet: string }> = [];
@@ -520,6 +556,8 @@ async function searchGoogle(query: string): Promise<SearchResult[]> {
       });
       return items.slice(0, 5);
     });
+
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
     return results;
   } catch (error) {
@@ -845,7 +883,15 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
         option.setName("prompt").setDescription("Your question or command for the AI").setRequired(true)
       )
       .toJSON(),
-    new SlashCommandBuilder().setName("yobnh-member").setDescription("Verify a yobnh member").toJSON()
+    new SlashCommandBuilder().setName("yobnh-member").setDescription("Verify a yobnh member").toJSON(),
+    new SlashCommandBuilder()
+      .setName("update-channel")
+      .setDescription("Set a channel to receive latest commit updates from the repo")
+      .addChannelOption(option =>
+        option.setName("channel").setDescription("The channel to post commit updates to").setRequired(true)
+      )
+      .setDMPermission(false)
+      .toJSON()
   ];
 
   const rest = new REST({ version: "10" }).setToken(token);
@@ -853,7 +899,7 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
   try {
     console.log("Synchronizing slash command arrays...");
     await rest.put(Routes.applicationCommands(clientId), { body: guildCommands });
-    console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member");
+    console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel");
   } catch (error) {
     console.error("Failed to register slash commands:", error);
   }
@@ -1047,6 +1093,101 @@ discord.on(Events.InteractionCreate, (interaction) => {
 
   if (interaction.commandName === "yobnh-member") {
     interaction.reply("YOBNH SHOULD BE VERIFIED NOW");
+  }
+
+  if (interaction.commandName === "update-channel") {
+    setImmediate(async () => {
+      if (!interaction.memberPermissions?.has('Administrator')) {
+        await interaction.reply({ content: "❌ You do not have permission to use this command.", ephemeral: true });
+        return;
+      }
+
+      try {
+        await interaction.deferReply();
+      } catch (deferError: any) {
+        if (deferError?.code !== 10062) {
+          console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
+          return;
+        }
+      }
+
+      const targetChannel = interaction.options.getChannel("channel", true);
+
+      if (!GITHUB_TOKEN) {
+        const failEmbed = new EmbedBuilder()
+          .setColor(0xED4245)
+          .setTitle("❌ Commit Fetch Failed")
+          .setDescription("No `GITHUB_TOKEN` environment variable is set. Cannot access the private repository.")
+          .setTimestamp();
+        await interaction.editReply({ embeds: [failEmbed] });
+        return;
+      }
+
+      try {
+        const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=10`;
+        const resp = await fetch(apiUrl, {
+          headers: {
+            Authorization: `Bearer ${GITHUB_TOKEN}`,
+            Accept: "application/vnd.github+json",
+            "User-Agent": "yobnh-bot",
+          },
+        });
+
+        if (!resp.ok) {
+          const body = await resp.text();
+          const failEmbed = new EmbedBuilder()
+            .setColor(0xED4245)
+            .setTitle("❌ Commit Fetch Failed")
+            .setDescription(`GitHub API returned \`${resp.status}\`:\n\`\`\`${body.slice(0, 500)}\`\`\``)
+            .setTimestamp();
+          await interaction.editReply({ embeds: [failEmbed] });
+          return;
+        }
+
+        const commits: any[] = await resp.json();
+
+        if (!commits.length) {
+          const failEmbed = new EmbedBuilder()
+            .setColor(0xED4245)
+            .setTitle("❌ No Commits Found")
+            .setDescription("The repository returned zero commits.")
+            .setTimestamp();
+          await interaction.editReply({ embeds: [failEmbed] });
+          return;
+        }
+
+        const fields = commits.map((c: any) => ({
+          name: `\`${c.sha.slice(0, 7)}\``,
+          value: c.commit.message.split("\n")[0],
+          inline: false,
+        }));
+
+        const successEmbed = new EmbedBuilder()
+          .setColor(0x57F287)
+          .setTitle("✅ Latest Commits — Update Channel")
+          .setDescription(`Fetched **${commits.length}** commit(s) from \`${GITHUB_REPO}\``)
+          .addFields(fields)
+          .setFooter({ text: `Repo: ${GITHUB_REPO}` })
+          .setTimestamp();
+
+        const target = discord.channels.cache.get(targetChannel.id);
+        if (!target || !("send" in target)) {
+          await interaction.editReply({ content: "❌ Could not access the specified channel." });
+          return;
+        }
+
+        await (target as any).send({ embeds: [successEmbed] });
+        await interaction.editReply({ content: `✅ Commit updates posted to <#${targetChannel.id}>` });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const failEmbed = new EmbedBuilder()
+          .setColor(0xED4245)
+          .setTitle("❌ Commit Fetch Failed")
+          .setDescription(`\`\`\`${msg}\`\`\``)
+          .setTimestamp();
+        try { await interaction.editReply({ embeds: [failEmbed] }); } catch {}
+      }
+    });
   }
 });
 
@@ -1345,6 +1486,36 @@ async function handleMessage(message: Message): Promise<void> {
     const cleaned = sanitizeUrl(rawUrl);
     if (!cleaned) {
       await channel.send("⚠️ The assistant returned an invalid URL to open. Please provide a valid `https://...` URL.");
+    } else if (/google\.com\/search/i.test(cleaned)) {
+      let googleQuery = userText;
+      try { googleQuery = new URL(cleaned).searchParams.get("q") || userText; } catch {}
+      if (typeof channel.sendTyping === "function") await channel.sendTyping();
+      try {
+        await channel.send(`🔎 Searching for: "${googleQuery}"...`);
+        const results = await searchGoogle(googleQuery);
+        browserData = results.length
+          ? `Search results for "${googleQuery}":\n${results
+              .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
+              .join("\n\n")}`
+          : `No Google results found for "${googleQuery}".`;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+      }
+    } else if (/^(https?:\/\/)?(www\.)?google\.com\/?$/i.test(cleaned)) {
+      if (typeof channel.sendTyping === "function") await channel.sendTyping();
+      try {
+        await channel.send(`🔎 Searching for: "${userText}"...`);
+        const results = await searchGoogle(userText);
+        browserData = results.length
+          ? `Search results for "${userText}":\n${results
+              .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
+              .join("\n\n")}`
+          : `No Google results found for "${userText}".`;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+      }
     } else {
       let systemOpened = false;
       const flags = parseOpenFlags(userText);
