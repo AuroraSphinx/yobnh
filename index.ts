@@ -1610,7 +1610,7 @@ discord.on(Events.InteractionCreate, (interaction) => {
       try {
         const attachment = interaction.options.getAttachment("file", true);
 
-        const targetDir = path.join(process.cwd(), "yobnh", "community-files", "files-sent");
+        const targetDir = path.join(process.cwd(), "community-files", "files-sent");
         fs.mkdirSync(targetDir, { recursive: true });
 
         const originalName = attachment.name;
