@@ -166,7 +166,37 @@ function removeBlacklist(userId: string): boolean {
 }
 
 function isBlacklisted(userId: string): boolean {
-  return blacklistedUsers.has(userId);
+  return blacklistedUsers.has(userId) || isTempBlacklisted(userId);
+}
+
+// --- Temporary Blacklist System (auto-escalating) ---
+const tempBlacklist = new Map<string, number>();
+const offenseCount = new Map<string, number>();
+const MAX_BAN_MINUTES = 120;
+
+function getBanDuration(offenses: number): number {
+  return Math.min(5 * Math.pow(2, offenses - 1), MAX_BAN_MINUTES);
+}
+
+function addTempBlacklist(userId: string): { duration: number; totalOffenses: number } {
+  const current = offenseCount.get(userId) || 0;
+  offenseCount.set(userId, current + 1);
+  const totalOffenses = current + 1;
+  const durationMin = getBanDuration(totalOffenses);
+  const expiry = Date.now() + durationMin * 60 * 1000;
+  tempBlacklist.set(userId, expiry);
+  logToFile(`[TEMP BAN] User ${userId} banned for ${durationMin}min (offense #${totalOffenses})`);
+  return { duration: durationMin, totalOffenses };
+}
+
+function isTempBlacklisted(userId: string): boolean {
+  if (!tempBlacklist.has(userId)) return false;
+  const expiry = tempBlacklist.get(userId)!;
+  if (Date.now() > expiry) {
+    tempBlacklist.delete(userId);
+    return false;
+  }
+  return true;
 }
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY || MISTRAL_API_KEY });
@@ -1587,6 +1617,12 @@ discord.on(Events.InteractionCreate, (interaction) => {
         if (!scanResult.clean) {
           try { fs.unlinkSync(tmpPath); } catch {}
           logToFile(`[FILE BLOCKED] "${safeName}" from ${interaction.user.tag} — ${scanResult.threat}`);
+
+          const banInfo = addTempBlacklist(interaction.user.id);
+          const banDurationStr = banInfo.duration >= 60
+            ? `${banInfo.duration / 60}h`
+            : `${banInfo.duration}min`;
+
           if (OWNER_ID) {
             try {
               const owner = await discord.users.fetch(OWNER_ID);
@@ -1594,11 +1630,22 @@ discord.on(Events.InteractionCreate, (interaction) => {
                 ? `**Server:** ${interaction.guild.name}\n**Channel:** <#${interaction.channelId}>`
                 : "**Source:** Direct Messages";
               await owner.send({
-                content: `🚫 **File blocked!**\n**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)\n**File:** \`${safeName}\`\n**Threat:** ${scanResult.threat}\n${source}`
+                content: [
+                  `🚫 **Malicious file blocked & user banned!**`,
+                  `**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)`,
+                  `**File:** \`${safeName}\``,
+                  `**Threat:** ${scanResult.threat}`,
+                  `**Ban duration:** ${banDurationStr}`,
+                  `**Offense #:** ${banInfo.totalOffenses}`,
+                  source,
+                ].join("\n"),
               });
             } catch {}
           }
-          await interaction.editReply({ content: `🚫 File blocked — threat detected: **${scanResult.threat}**` });
+
+          await interaction.editReply({
+            content: `🚫 File blocked — threat detected: **${scanResult.threat}**\nYou have been temporarily banned from using this command for **${banDurationStr}**.`
+          });
           return;
         }
 
@@ -2183,6 +2230,19 @@ function startTempCleanup(): void {
   debugLog("CLEANUP", "Temp file cleanup scheduled every 30 minutes");
 }
 
+function startTempBlacklistCleanup(): void {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [userId, expiry] of tempBlacklist) {
+      if (now > expiry) {
+        tempBlacklist.delete(userId);
+        debugLog("TEMP BAN", `Ban expired for user ${userId}`);
+      }
+    }
+  }, 60_000).unref();
+  debugLog("TEMP BAN", "Temp blacklist cleanup scheduled every 60 seconds");
+}
+
 async function main() {
   const setupRl = readline.createInterface({ input: process.stdin, output: process.stdout });
   
@@ -2214,6 +2274,7 @@ async function main() {
   setupGracefulShutdown();
   startHardwarePerformanceWatchdog();
   startTempCleanup();
+  startTempBlacklistCleanup();
   loadBlacklist();
 
   if (!DISCORD_TOKEN) {
