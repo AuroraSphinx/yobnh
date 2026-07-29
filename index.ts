@@ -1631,15 +1631,9 @@ discord.on(Events.InteractionCreate, (interaction) => {
   }
 
   if (interaction.commandName === "send-file") {
-    const allowedServer = "1501001730010251264";
     setImmediate(async () => {
-      if (interaction.guildId !== allowedServer) {
-        await interaction.reply({ content: "❌ This command is only available in the designated server.", ephemeral: true });
-        return;
-      }
-
       try {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply();
       } catch {
         logToFile("[FILE ERROR] Failed to defer reply for send-file");
         return;
