@@ -12,7 +12,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import readline from "readline";
-import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, EmbedBuilder } from "discord.js";
+import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, EmbedBuilder, Team } from "discord.js";
 import { OpenAI } from "openai";
 import { chromium, Browser } from "playwright";
 import { exec as execCb, spawn, execFile } from "child_process";
@@ -21,6 +21,28 @@ import pidusage from "pidusage"; // Import pidusage to track system performance 
 
 const exec = promisify(execCb);
 const username = os.userInfo().username;
+
+// --- Environment Variable Loader (.env support) --------------------------------
+function loadEnvFile(): void {
+  const envPath = path.join(process.cwd(), '.env');
+  if (!fs.existsSync(envPath)) return;
+  const content = fs.readFileSync(envPath, 'utf-8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let val = trimmed.slice(eqIdx + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (key && !process.env[key]) {
+      process.env[key] = val;
+    }
+  }
+}
+loadEnvFile();
 
 // --- Configuration & Initialization ------------------------------------------
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN ?? "";
@@ -59,6 +81,7 @@ RULES FOR ACTIONS (If you explicitly need to use a tool):
 - untimeout user: {"action":"untimeout","user":"username_or_id","reason":"optional reason"}
 - ban user: {"action":"ban","user":"username_or_id","reason":"optional reason"}
 - unban user: {"action":"unban","user":"username_or_id","reason":"optional reason"}
+- search images: {"action":"search_images","query":"..."}
 - If you need to perform actions, you can send a SINGLE action or an ARRAY of actions to execute them sequentially.
 - Your response must be ONLY valid JSON with NO conversational text around it ONLY when using actions.
 
@@ -73,6 +96,7 @@ IMPORTANT RULES:
 - If the user asks you to search for information, reply ONLY with JSON.
 - Do not say "I need to search" or "let me look that up" in chat. Do not mention toolcalls or errors.
 - NEVER open google.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-Google websites only.
+- If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open, mouse_move, mouse_click, launch, or any other actions when searching for images. Just send the single search_images action and nothing else.
 - Do not mention Detg or say "aw shucks".
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 `;
@@ -147,12 +171,33 @@ function isBlacklisted(userId: string): boolean {
 
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY || MISTRAL_API_KEY });
 const conversations = new Map<string, ChatMessage[]>();
+let OWNER_ID = "";
+const activeBrowsers = new Set<Browser>();
 let verboseEnabled = VERBOSE;
 
 function debugLog(level: string, message: string, meta: Record<string, unknown> | null = null): void {
   if (!verboseEnabled) return;
   const prefix = `[${new Date().toISOString()}] [${level}]`;
   console.log(prefix, message, meta ? JSON.stringify(meta, null, 2) : "");
+}
+
+const LOG_FILE = path.join(process.cwd(), "logs.txt");
+
+let lastLogDate = new Date().toISOString().slice(0, 10);
+
+function logToFile(message: string): void {
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  if (today !== lastLogDate) {
+    lastLogDate = today;
+    try { fs.writeFileSync(LOG_FILE, "", "utf-8"); } catch {}
+  }
+  const timestamp = now.toISOString();
+  const line = `[${timestamp}] ${message}\n`;
+  try {
+    fs.appendFileSync(LOG_FILE, line, "utf-8");
+  } catch {}
+  console.log(line.trim());
 }
 
 function getHistory(channelId: string, userId: string): ChatMessage[] {
@@ -279,7 +324,7 @@ function createConsoleInterface(): void {
     const [command, ...args] = line.trim().split(/\s+/);
     switch ((command || "").toLowerCase()) {
       case "help":
-        console.log("Commands: help, status, history <channelId> <userId>, verbose on|off, blacklist add|remove|list <userId>, ascii, exit");
+        console.log("Commands: help, status, history <channelId> <userId>, verbose on|off, blacklist add|remove|list <userId>, clear <channelId> <userId>, ascii, exit");
         break;
       case "status":
         console.log("Discord ready:", discord?.user?.tag || "not logged in");
@@ -304,6 +349,20 @@ function createConsoleInterface(): void {
         } else {
           console.log("Usage: verbose on|off");
         }
+        break;
+      case "clear": {
+        const [channelId, userId] = args;
+        if (!channelId || !userId) {
+          console.log("Usage: clear <channelId> <userId>");
+        } else {
+          conversations.delete(`${channelId}-${userId}`);
+          console.log(`Cleared history for ${channelId}-${userId}`);
+        }
+        break;
+      }
+      case "clearall":
+        conversations.clear();
+        console.log("Cleared all conversation histories.");
         break;
       case "ascii":
         printStartupBanner();
@@ -441,6 +500,7 @@ async function browseUrl(url: string, keepVisible = false, viewportWidth = 1280,
     }
     
     browser = await chromium.launch(launchOptions);
+    activeBrowsers.add(browser);
     const context = await browser.newContext({ viewport: keepVisible ? { width: viewportWidth, height: viewportHeight } : null });
     const page = await context.newPage();
     const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -454,6 +514,7 @@ async function browseUrl(url: string, keepVisible = false, viewportWidth = 1280,
     });
 
     if (!keepVisible && browser) {
+      activeBrowsers.delete(browser);
       await browser.close();
     }
 
@@ -467,7 +528,7 @@ async function browseUrl(url: string, keepVisible = false, viewportWidth = 1280,
 
     return { title, url, content };
   } catch (error) {
-    if (browser) await browser.close();
+    if (browser) { activeBrowsers.delete(browser); await browser.close(); }
     try {
       await openWithSystem(url);
       return { title: url, url, content: "Opened in system default browser (fallback)" };
@@ -502,9 +563,10 @@ async function openWithSystem(url: string): Promise<void> {
 
 async function searchGoogle(query: string): Promise<SearchResult[]> {
   let browser: Browser | null = null;
+  const tempProfile = path.join(os.tmpdir(), `yobnh_chrome_${Date.now()}`);
   try {
-    debugLog("INFO", "Starting Google search", { query });
-    browser = await chromium.launch({
+    logToFile(`[SEARCH] Starting Google search for: "${query}"`);
+    const context = await chromium.launchPersistentContext(tempProfile, {
       headless: false,
       timeout: 30000,
       args: [
@@ -512,12 +574,12 @@ async function searchGoogle(query: string): Promise<SearchResult[]> {
         "--no-first-run",
         "--no-default-browser-check",
       ],
-    });
-    const context = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       viewport: { width: 1280, height: 800 },
       locale: "en-US",
     });
+    browser = context.browser()!;
+    activeBrowsers.add(browser);
     const page = await context.newPage();
 
     await page.addInitScript(() => {
@@ -561,11 +623,203 @@ async function searchGoogle(query: string): Promise<SearchResult[]> {
 
     return results;
   } catch (error) {
+    logToFile(`[SEARCH ERROR] ${error}`);
     throw error;
   } finally {
     if (browser) {
+      activeBrowsers.delete(browser);
       await browser.close();
     }
+    try { fs.rmSync(tempProfile, { recursive: true, force: true }); } catch {}
+  }
+}
+
+async function searchGoogleImages(query: string): Promise<Array<{ imagePath: string; title: string }>> {
+  let browser: Browser | null = null;
+  const tempProfile = path.join(os.tmpdir(), `yobnh_chrome_img_${Date.now()}`);
+  const imagesDir = path.join(process.cwd(), "images_temps");
+  logToFile(`[IMAGE SEARCH] Starting search for: "${query}"`);
+  try {
+    if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
+
+    logToFile(`[IMAGE SEARCH] Launching browser...`);
+    const context = await chromium.launchPersistentContext(tempProfile, {
+      headless: false,
+      timeout: 60000,
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+      ],
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      viewport: { width: 1280, height: 800 },
+      locale: "en-US",
+    });
+    browser = context.browser()!;
+    activeBrowsers.add(browser);
+    const page = await context.newPage();
+
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
+    });
+
+    const url = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iar=images&iax=images&ia=images`;
+    logToFile(`[IMAGE SEARCH] Navigating to: ${url}`);
+    await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+
+    // Wait for thumbnails to load
+    await page.waitForTimeout(5000);
+
+    logToFile(`[IMAGE SEARCH] Page loaded, extracting image URLs...`);
+
+    // Extract actual image URLs from DuckDuckGo results
+    const imageUrls: Array<{ url: string; title: string }> = await page.evaluate(() => {
+      const results: Array<{ url: string; title: string }> = [];
+
+      const imgs = document.querySelectorAll('img');
+      for (const img of Array.from(imgs)) {
+        const htmlImg = img as HTMLImageElement;
+        const src = htmlImg.src || htmlImg.getAttribute('data-src') || '';
+        if (!src || !src.startsWith('http') || src.includes('data:')) continue;
+        if (src.includes('/dist/react-assets/')) continue;
+        if (src.includes('.ico')) continue;
+        const title = htmlImg.alt || '';
+        if (!results.find(r => r.url === src)) {
+          results.push({ url: src, title });
+        }
+      }
+
+      return results.slice(0, 10);
+    });
+
+    logToFile(`[IMAGE SEARCH] Found ${imageUrls.length} image URLs`);
+
+    // NSFW filter - blocked domains
+    const nsfwDomains = [
+      'rule34', 'pornhub', 'xvideos', 'xnxx', 'xhamster', 'redtube',
+      'youporn', 'spankbang', 'beeg', 'brazzers', 'realitykings',
+      'bangbros', 'naughtyamerica', 'mofos', 'twistys', 'digitalplayground',
+      'sex.com', 'playvids', 'txxx', 'hclips', 'hdzog', 'vjav',
+      'sxyprn', 'nudostar', 'fapello', 'coomer', 'simpcity',
+      'e621', 'gelbooru', 'danbooru', 'konachan', 'safebooru',
+      'nhentai', 'hanime', 'hentaihaven', 'hentaidude', 'hanime.tv',
+      'pornone', 'eporner', 'drtuber', 'tubegalore', 'ixxx',
+      'porntrex', 'tube8', 'tnaflix', 'sunporno', 'fuq.com',
+      'thumbzilla', 'tnaflix', 'xxxymovies', 'heavy-r', 'youjizz',
+    ];
+
+    // NSFW keyword patterns in URLs/titles
+    const nsfwKeywords = [
+      'porn', 'xxx', 'sex', 'nude', 'naked', 'nsfw', 'hentai',
+      'rule34', 'boobs', 'tits', 'ass', 'pussy', 'dick', 'cock',
+      'penis', 'vagina', 'orgasm', 'blowjob', 'handjob', 'anal',
+      'milf', 'stepmom', 'stepsister', 'anime', 'nude',
+      'erotic', 'fetish', 'bondage', 'bdsm', 'slut', 'whore',
+      'onlyfans', 'fansly', 'leaked', 'fap', 'masturbat',
+      'creampie', 'gangbang', 'threesome', 'lesbian', 'gay',
+      'tranny', 'shemale', 'lgbtq',  // lgbtq sometimes misused for porn
+      'topless', 'topless', 'cleavage', 'lingerie', 'playboy',
+    ];
+
+    function isNSFW(url: string, title: string, query: string): boolean {
+      const lowerUrl = url.toLowerCase();
+      const lowerTitle = title.toLowerCase();
+      const lowerQuery = query.toLowerCase();
+
+      // Check for NSFW domains
+      for (const domain of nsfwDomains) {
+        if (lowerUrl.includes(domain)) {
+          logToFile(`[NSFW FILTER] Blocked domain "${domain}" in: ${url.slice(0, 80)}`);
+          return true;
+        }
+      }
+
+      // Check query for explicit keywords
+      for (const keyword of nsfwKeywords) {
+        if (lowerQuery.includes(keyword)) {
+          logToFile(`[NSFW FILTER] Blocked query keyword "${keyword}" in query: "${query}"`);
+          return true;
+        }
+      }
+
+      // Check URL and title for NSFW keywords (but not common safe words)
+      const checkText = `${lowerUrl} ${lowerTitle}`;
+      for (const keyword of nsfwKeywords) {
+        if (checkText.includes(keyword)) {
+          logToFile(`[NSFW FILTER] Blocked keyword "${keyword}" in URL/title`);
+          return true;
+        }
+      }
+
+      // Decode DuckDuckGo proxy URLs to check the original source
+      const uddgMatch = lowerUrl.match(/u=([^&]+)/);
+      if (uddgMatch) {
+        const decoded = decodeURIComponent(uddgMatch[1]).toLowerCase();
+        for (const domain of nsfwDomains) {
+          if (decoded.includes(domain)) {
+            logToFile(`[NSFW FILTER] Blocked decoded domain "${domain}"`);
+            return true;
+          }
+        }
+        for (const keyword of nsfwKeywords) {
+          if (decoded.includes(keyword)) {
+            logToFile(`[NSFW FILTER] Blocked decoded keyword "${keyword}"`);
+            return true;
+          }
+        }
+      }
+
+      return false;
+    }
+
+    // Filter out NSFW images
+    const safeUrls = imageUrls.filter(item => {
+      if (isNSFW(item.url, item.title, query)) return false;
+      return true;
+    });
+
+    logToFile(`[NSFW FILTER] ${imageUrls.length} → ${safeUrls.length} safe images`);
+
+    // Download images via Playwright's request API (no CORS issues)
+    const downloadedImages: Array<{ imagePath: string; title: string }> = [];
+
+    for (let i = 0; i < Math.min(safeUrls.length, 4); i++) {
+      const imgUrl = safeUrls[i].url;
+      logToFile(`[IMAGE SEARCH] Downloading image ${i + 1}: ${imgUrl.slice(0, 100)}`);
+
+      try {
+        const response = await context.request.get(imgUrl, { timeout: 15000 });
+        if (!response.ok()) {
+          logToFile(`[IMAGE SEARCH] Image ${i + 1} HTTP ${response.status()}`);
+          continue;
+        }
+        const buffer = await response.body();
+        if (buffer.length < 1000) {
+          logToFile(`[IMAGE SEARCH] Image ${i + 1} too small (${buffer.length} bytes)`);
+          continue;
+        }
+        const tempPath = path.join(imagesDir, `search_${Date.now()}_${i}.jpg`);
+        fs.writeFileSync(tempPath, buffer);
+        const sizeKB = Math.round(buffer.length / 1024);
+        logToFile(`[IMAGE SEARCH] Saved image ${i + 1}: ${tempPath} (${sizeKB}KB)`);
+        downloadedImages.push({ imagePath: tempPath, title: safeUrls[i].title || query });
+      } catch (err) {
+        logToFile(`[IMAGE SEARCH] Image ${i + 1} download error: ${err}`);
+      }
+    }
+
+    logToFile(`[IMAGE SEARCH] Successfully downloaded ${downloadedImages.length} safe images`);
+    return downloadedImages;
+  } catch (error) {
+    logToFile(`[IMAGE SEARCH ERROR] ${error}`);
+    return [];
+  } finally {
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    if (browser) {
+      activeBrowsers.delete(browser);
+      await browser.close();
+    }
+    try { fs.rmSync(tempProfile, { recursive: true, force: true }); } catch {}
   }
 }
 
@@ -884,6 +1138,7 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
       )
       .toJSON(),
     new SlashCommandBuilder().setName("yobnh-member").setDescription("Verify a yobnh member").toJSON(),
+    new SlashCommandBuilder().setName("clearmemory").setDescription("Reset your conversation history with the AI").toJSON(),
     new SlashCommandBuilder()
       .setName("update-channel")
       .setDescription("Set a channel to receive latest commit updates from the repo")
@@ -891,6 +1146,20 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
         option.setName("channel").setDescription("The channel to post commit updates to").setRequired(true)
       )
       .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("send-file")
+      .setDescription("Send a file to AuroraSphinx")
+      .addAttachmentOption(option =>
+        option.setName("file").setDescription("The file you want to send").setRequired(true)
+      )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("notice-aurora")
+      .setDescription("Send a notice to AuroraSphinx")
+      .addStringOption(option =>
+        option.setName("message").setDescription("Your notice message").setRequired(true)
+      )
       .toJSON()
   ];
 
@@ -899,7 +1168,7 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
   try {
     console.log("Synchronizing slash command arrays...");
     await rest.put(Routes.applicationCommands(clientId), { body: guildCommands });
-    console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel");
+    console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora");
   } catch (error) {
     console.error("Failed to register slash commands:", error);
   }
@@ -1071,17 +1340,88 @@ discord.on(Events.InteractionCreate, (interaction) => {
       }
 
       try {
-        const askFn = (global as any).askAI;
-        if (!askFn) {
-          await interaction.editReply("AI system is not initialized yet.");
-          return;
+        const channelId = interaction.channelId;
+        const userId = interaction.user.id;
+        addToHistory(channelId, userId, "user", prompt);
+
+        let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 512, 0.5);
+        logToFile(`[ASK AI REPLY] ${reply}`);
+        let parsed = extractJsonFromText(reply);
+
+        // Handle array of actions (e.g. [{"action":"search_images","query":"..."}])
+        if (Array.isArray(parsed)) {
+          logToFile(`[ASK PARSED ARRAY] ${JSON.stringify(parsed)}`);
+          const imageAction = parsed.find((a: any) => a.action === "search_images");
+          if (imageAction) {
+            parsed = imageAction;
+            logToFile(`[ASK EXTRACTED search_images] ${JSON.stringify(parsed)}`);
+          }
         }
 
-        const reply = await askFn(prompt);
-        const chunks = splitMessage(reply, 2000);
-        await interaction.editReply(chunks[0]);
-        for (let i = 1; i < chunks.length; i++) {
-          await interaction.followUp(chunks[i]);
+        if (parsed?.action === "search_images" && parsed.query) {
+          logToFile(`[ASK ACTION] search_images: "${parsed.query}"`);
+          await interaction.editReply(`🖼️ Searching images for: "${parsed.query}"...\n\n⚠️ **This feature is a work in progress, bugs are expected...**`);
+          const imageDataArr = await searchGoogleImages(parsed.query);
+          logToFile(`[ASK IMAGE RESULT] Got ${imageDataArr.length} images`);
+          if (imageDataArr.length > 0) {
+            try {
+              const attachments = imageDataArr.map(img => new AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
+              await interaction.editReply({ content: `🖼️ **${parsed.query}** (${imageDataArr.length} images)`, files: attachments });
+              for (const img of imageDataArr) {
+                try { fs.unlinkSync(img.imagePath); } catch {}
+              }
+            } catch (sendErr) {
+              logToFile(`[ASK IMAGE SEND ERROR] ${sendErr}`);
+              await interaction.editReply(`⚠️ Found images but failed to send them.`);
+            }
+          } else {
+            await interaction.editReply(`⚠️ I couldn't find any images for "${parsed.query}".`);
+          }
+          addToHistory(channelId, userId, "assistant", `Searched images for: ${parsed.query}`);
+        } else if (parsed?.action === "search" && parsed.query) {
+          await interaction.editReply(`🔎 Searching for: "${parsed.query}"...`);
+          const results = await searchGoogle(parsed.query);
+          const browserData = results.length
+            ? `Search results for "${parsed.query}":\n${results.map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}`).join("\n\n")}`
+            : `No results found.`;
+          addToHistory(channelId, userId, "assistant", reply);
+          addToHistory(channelId, userId, "user", `Browser results:\n${browserData}`);
+          reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
+          addToHistory(channelId, userId, "assistant", reply);
+          const chunks = splitMessage(reply, 2000);
+          await interaction.editReply(chunks[0]);
+          for (let i = 1; i < chunks.length; i++) {
+            await interaction.followUp(chunks[i]);
+          }
+        } else if (parsed?.action === "open" && parsed.url) {
+          const cleaned = sanitizeUrl(String(parsed.url));
+          if (!cleaned) {
+            await interaction.editReply("⚠️ Invalid URL.");
+          } else {
+            await interaction.editReply(`🌐 Opening: ${cleaned}`);
+            try {
+              const page = await browseUrl(cleaned, false, 1280, 720);
+              addToHistory(channelId, userId, "assistant", reply);
+              addToHistory(channelId, userId, "user", `Browser results:\nOpened page: ${page.title}\nURL: ${page.url}\n\n${page.content}`);
+              reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
+              addToHistory(channelId, userId, "assistant", reply);
+              const chunks = splitMessage(reply, 2000);
+              await interaction.editReply(chunks[0]);
+              for (let i = 1; i < chunks.length; i++) {
+                await interaction.followUp(chunks[i]);
+              }
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              await interaction.editReply(`⚠️ Failed to open: ${msg}`);
+            }
+          }
+        } else {
+          addToHistory(channelId, userId, "assistant", reply);
+          const chunks = splitMessage(reply, 2000);
+          await interaction.editReply(chunks[0]);
+          for (let i = 1; i < chunks.length; i++) {
+            await interaction.followUp(chunks[i]);
+          }
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1093,6 +1433,12 @@ discord.on(Events.InteractionCreate, (interaction) => {
 
   if (interaction.commandName === "yobnh-member") {
     interaction.reply("YOBNH SHOULD BE VERIFIED NOW");
+  }
+
+  if (interaction.commandName === "clearmemory") {
+    const key = `${interaction.channelId}-${interaction.user.id}`;
+    conversations.delete(key);
+    interaction.reply({ content: "✅ Your conversation history has been cleared.", ephemeral: true });
   }
 
   if (interaction.commandName === "update-channel") {
@@ -1189,11 +1535,114 @@ discord.on(Events.InteractionCreate, (interaction) => {
       }
     });
   }
+
+  if (interaction.commandName === "send-file") {
+    setImmediate(async () => {
+      try {
+        await interaction.deferReply({ ephemeral: true });
+      } catch {}
+
+      const attachment = interaction.options.getAttachment("file", true);
+
+      const targetDir = path.join(process.cwd(), "yobnh", "community-files", "files-sent");
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      const originalName = attachment.name;
+      const ext = path.extname(originalName);
+      const baseName = path.basename(originalName, ext);
+      const timestamp = Date.now();
+      const safeName = `${baseName}_${timestamp}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const savePath = path.join(targetDir, safeName);
+
+      try {
+        const response = await fetch(attachment.url);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        fs.writeFileSync(savePath, buffer);
+        logToFile(`[FILE] Saved "${safeName}" from ${interaction.user.tag} (${interaction.user.id})`);
+
+        if (OWNER_ID) {
+          try {
+            const owner = await discord.users.fetch(OWNER_ID);
+            const source = interaction.guild
+              ? `**Server:** ${interaction.guild.name}\n**Channel:** <#${interaction.channelId}>`
+              : "**Source:** Direct Messages";
+            await owner.send({
+              content: `📁 **File received!**\n**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)\n**File:** \`${safeName}\`\n${source}`
+            });
+          } catch {}
+        }
+
+        await interaction.editReply({ content: `✅ File saved as \`${safeName}\`` });
+      } catch (err) {
+        logToFile(`[FILE ERROR] Failed to save file from ${interaction.user.tag}: ${err}`);
+        await interaction.editReply({ content: "❌ Failed to save the file. Try again later." });
+      }
+    });
+  }
+
+  if (interaction.commandName === "notice-aurora") {
+    setImmediate(async () => {
+      try {
+        await interaction.deferReply({ ephemeral: true });
+      } catch {}
+
+      const msgContent = interaction.options.getString("message", true);
+
+      if (!OWNER_ID) {
+        await interaction.editReply({ content: "❌ Bot owner is not configured yet." });
+        return;
+      }
+
+      try {
+        const owner = await discord.users.fetch(OWNER_ID);
+        const channelName = interaction.channel?.isDMBased()
+          ? "Direct Messages"
+          : `#${(interaction.channel as any)?.name || "unknown"}`;
+        const guildName = interaction.guild?.name || "Direct Messages";
+        const messageLink = interaction.channel?.isDMBased()
+          ? `https://discord.com/channels/@me/${interaction.channelId}`
+          : `https://discord.com/channels/${interaction.guildId}/${interaction.channelId}`;
+
+        const embed = new EmbedBuilder()
+          .setColor(0x5865F2)
+          .setTitle("Notice from Aurora")
+          .setDescription(msgContent)
+          .addFields(
+            { name: "From", value: `${interaction.user.tag} (\`${interaction.user.id}\`)`, inline: true },
+            { name: "Server", value: guildName, inline: true },
+            { name: "Channel", value: channelName, inline: true }
+          )
+          .setTimestamp();
+
+        await owner.send({ content: messageLink, embeds: [embed] });
+
+        await interaction.editReply({ content: "✅ Your notice has been sent to AuroraSphinx!" });
+      } catch (err) {
+        logToFile(`[NOTICE ERROR] Failed to send notice from ${interaction.user.tag}: ${err}`);
+        await interaction.editReply({ content: "❌ Failed to send the notice. The owner may have DMs disabled." });
+      }
+    });
+  }
 });
 
 discord.once(Events.ClientReady, async (client) => {
-  console.log(`? Logged in as ${client.user.tag}`);
-  console.log(`?? Bot ready. Guilds: ${client.guilds.cache.size}`);
+  logToFile(`[BOT] Logged in as ${client.user.tag}`);
+  logToFile(`[BOT] Guilds: ${client.guilds.cache.size}`);
+
+  try {
+    const app = await client.application!.fetch();
+    if (app.owner) {
+      if (app.owner instanceof Team) {
+        OWNER_ID = app.owner.members.first()?.id ?? "";
+      } else {
+        OWNER_ID = (app.owner as any).id;
+      }
+      logToFile(`[BOT] Owner ID: ${OWNER_ID}`);
+    }
+  } catch (err) {
+    console.error("Failed to fetch bot owner:", err);
+  }
+
   try {
     await registerSlashCommands(client.user.id, DISCORD_TOKEN);
   } catch (err) {
@@ -1414,6 +1863,25 @@ async function executeSingleAction(parsed: any, channel: any, userId: string, ch
       addToHistory(channelId, userId, "assistant", `Failed to unban user ID ${userQuery}: ${err.message}`);
     }
   }
+
+  if (parsed?.action === "search_images" && parsed.query) {
+    try {
+      await channel.send(`🖼️ Searching images for: "${parsed.query}"...`);
+      const imageDataArr = await searchGoogleImages(parsed.query);
+      if (imageDataArr.length > 0) {
+        const attachments = imageDataArr.map(img => new AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
+        await channel.send({ content: `🖼️ **${imageDataArr[0].title || parsed.query}** (${imageDataArr.length} images)`, files: attachments });
+        for (const img of imageDataArr) {
+          try { fs.unlinkSync(img.imagePath); } catch {}
+        }
+      } else {
+        await channel.send(`⚠️ I couldn't find any images for "${parsed.query}".`);
+      }
+      addToHistory(channelId, userId, "assistant", `Searched images for: ${parsed.query}`);
+    } catch (err) {
+      await channel.send(`⚠️ Image search failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }
 
 async function handleMessage(message: Message): Promise<void> {
@@ -1443,15 +1911,19 @@ async function handleMessage(message: Message): Promise<void> {
     return;
   }
 
+  logToFile(`[MSG] ${message.author.tag} (${message.author.id}): ${userText}`);
+
   if (typeof channel.sendTyping === "function") await channel.sendTyping();
   const channelId = message.channel.id;
   const userId = message.author.id;
   addToHistory(channelId, userId, "user", userText);
 
   let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 256, 0.4);
+  logToFile(`[AI REPLY] ${reply}`);
   let parsed = extractJsonFromText(reply);
 
   if (parsed) {
+    logToFile(`[PARSED ACTION] ${JSON.stringify(parsed)}`);
     addToHistory(channelId, userId, "assistant", reply);
 
     if (Array.isArray(parsed)) {
@@ -1459,7 +1931,7 @@ async function handleMessage(message: Message): Promise<void> {
         await executeSingleAction(item, channel, userId, channelId);
       }
       return;
-    } else if (parsed.action === "mouse_move" || parsed.action === "mouse_click" || parsed.action === "launch" || parsed.action === "kick" || parsed.action === "timeout" || parsed.action === "untimeout" || parsed.action === "ban" || parsed.action === "unban") {
+    } else if (parsed.action === "mouse_move" || parsed.action === "mouse_click" || parsed.action === "launch" || parsed.action === "kick" || parsed.action === "timeout" || parsed.action === "untimeout" || parsed.action === "ban" || parsed.action === "unban" || parsed.action === "search_images") {
       await executeSingleAction(parsed, channel, userId, channelId);
       return;
     }
@@ -1480,6 +1952,29 @@ async function handleMessage(message: Message): Promise<void> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+    }
+  } else if (parsed?.action === "search_images" && parsed.query) {
+    logToFile(`[ACTION] search_images: "${parsed.query}"`);
+    if (typeof channel.sendTyping === "function") await channel.sendTyping();
+    try {
+      await channel.send(`🖼️ Searching images for: "${parsed.query}"...`);
+      const imageDataArr = await searchGoogleImages(parsed.query);
+      if (imageDataArr.length > 0) {
+        logToFile(`[IMAGE SUCCESS] Got ${imageDataArr.length} images`);
+        const attachments = imageDataArr.map(img => new AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
+        await channel.send({ content: `🖼️ **${parsed.query}** (${imageDataArr.length} images)`, files: attachments });
+        // Cleanup temp files after sending
+        for (const img of imageDataArr) {
+          try { fs.unlinkSync(img.imagePath); } catch {}
+        }
+      } else {
+        logToFile(`[IMAGE FAILED] No images found for "${parsed.query}"`);
+        await channel.send(`⚠️ I couldn't find any images for "${parsed.query}".`);
+      }
+    } catch (err) {
+      logToFile(`[IMAGE ERROR] ${err}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      await channel.send(`⚠️ Image search failed: ${msg}.`);
     }
   } else if (parsed?.action === "open" && parsed.url) {
     const rawUrl = String(parsed.url);
@@ -1569,6 +2064,7 @@ discord.on(Events.MessageCreate, async (message) => {
   try {
     await handleMessage(message);
   } catch (error) {
+    logToFile(`[ERROR] ${error instanceof Error ? error.message : String(error)}\n${error instanceof Error ? error.stack : ""}`);
     const errorPayload = {
       type: "ERROR",
       time: new Date().toLocaleTimeString("en-US", { hour12: false }),
@@ -1583,6 +2079,63 @@ discord.on(Events.MessageCreate, async (message) => {
 
 process.on("unhandledRejection", (reason) => { console.error("Unhandled rejection:", reason); });
 process.on("uncaughtException", (error) => { console.error("Uncaught exception:", error); });
+
+// --- Graceful Shutdown ---
+function setupGracefulShutdown(): void {
+  const shutdown = async (signal: string) => {
+    console.log(`\n[SHUTDOWN] Received ${signal}. Cleaning up...`);
+    logToFile(`[SHUTDOWN] Received ${signal}.`);
+    for (const browser of activeBrowsers) {
+      try { await browser.close(); } catch {}
+    }
+    activeBrowsers.clear();
+    saveBlacklist();
+    try { terminalInterface?.close(); } catch {}
+    try { discord.destroy(); } catch {}
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
+// --- Temp File Cleanup ---
+function startTempCleanup(): void {
+  const INTERVAL = 30 * 60 * 1000;
+  setInterval(() => {
+    const imageDir = path.join(process.cwd(), 'images_temps');
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    try {
+      if (fs.existsSync(imageDir)) {
+        const files = fs.readdirSync(imageDir);
+        for (const file of files) {
+          const filePath = path.join(imageDir, file);
+          try {
+            const stat = fs.statSync(filePath);
+            if (stat.isFile() && stat.mtimeMs < cutoff) {
+              fs.unlinkSync(filePath);
+              debugLog("CLEANUP", `Removed old temp file: ${file}`);
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+    try {
+      const tmpFiles = fs.readdirSync(os.tmpdir());
+      for (const file of tmpFiles) {
+        if (!file.startsWith('yobnh_chrome_')) continue;
+        const filePath = path.join(os.tmpdir(), file);
+        try {
+          const stat = fs.statSync(filePath);
+          if (stat.mtimeMs < cutoff) {
+            fs.rmSync(filePath, { recursive: true, force: true });
+            debugLog("CLEANUP", `Removed old chrome profile: ${file}`);
+          }
+        } catch {}
+      }
+    } catch {}
+  }, INTERVAL).unref();
+  debugLog("CLEANUP", "Temp file cleanup scheduled every 30 minutes");
+}
 
 async function main() {
   const setupRl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -1612,7 +2165,9 @@ async function main() {
 
   printStartupBanner();
   createConsoleInterface();
+  setupGracefulShutdown();
   startHardwarePerformanceWatchdog();
+  startTempCleanup();
   loadBlacklist();
 
   if (!DISCORD_TOKEN) {
@@ -1626,7 +2181,27 @@ async function main() {
   });
 }
 
-main();
+async function runWithRetry(): Promise<void> {
+  const MAX_RETRIES = 10;
+  const RETRY_DELAY = 5000;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await main();
+      break;
+    } catch (err) {
+      console.error(`\n[FATAL] Bot crashed (attempt ${attempt}/${MAX_RETRIES}). Restarting in ${RETRY_DELAY / 1000}s...`);
+      console.error(err);
+      logToFile(`[FATAL] Bot crashed (attempt ${attempt}): ${err instanceof Error ? err.message : String(err)}`);
+      if (attempt >= MAX_RETRIES) {
+        console.error("[FATAL] Max retries reached. Giving up.");
+        process.exit(1);
+      }
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+    }
+  }
+}
+
+runWithRetry();
 
 // --- Interfaces ---
 interface ChatMessage {

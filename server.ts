@@ -2,7 +2,7 @@ import http from "http";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { exec, spawn, ChildProcess } from "child_process";
+import { spawn, ChildProcess } from "child_process";
 
 // --- Discord Client Hook ---
 function getDiscordClient(): any {
@@ -13,7 +13,6 @@ const PORT = Number(process.env.ADMIN_PORT ?? 3000);
 const ADMIN_USER = process.env.ADMIN_USER ?? "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS ?? "aurora2026";
 const LOG_FILE = path.join(__dirname, "bot-errors.log");
-const BOT_SCRIPT = path.join(__dirname, "index.ts");
 
 // --- Bot Process Management ---
 let botProcess: ChildProcess | null = null;
