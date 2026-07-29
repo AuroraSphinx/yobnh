@@ -1145,6 +1145,42 @@ async function captureGridScreenshot(outputPath: string): Promise<void> {
   try { fs.unlinkSync(screenshotPath); } catch {}
 }
 
+async function handleMaliciousFile(interaction: any, safeName: string, threatName: string, tmpPath: string): Promise<void> {
+  try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+  logToFile(`[FILE BLOCKED] "${safeName}" from ${interaction.user.tag} — ${threatName}`);
+
+  const banInfo = addTempBlacklist(interaction.user.id);
+  const banDurationStr = banInfo.duration >= 60
+    ? `${banInfo.duration / 60}h`
+    : `${banInfo.duration}min`;
+
+  if (OWNER_ID) {
+    try {
+      const owner = await discord.users.fetch(OWNER_ID);
+      const source = interaction.guild
+        ? `**Server:** ${interaction.guild.name}\n**Channel:** <#${interaction.channelId}>`
+        : "**Source:** Direct Messages";
+      await owner.send({
+        content: [
+          `🚫 **Malicious file blocked & user banned!**`,
+          `**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)`,
+          `**File:** \`${safeName}\``,
+          `**Threat:** ${threatName}`,
+          `**Ban duration:** ${banDurationStr}`,
+          `**Offense #:** ${banInfo.totalOffenses}`,
+          source,
+        ].join("\n"),
+      });
+    } catch {}
+  }
+
+  try {
+    await interaction.editReply({
+      content: `🚫 File blocked — threat detected: **${threatName}**\nYou have been temporarily banned from using this command for **${banDurationStr}**.`
+    });
+  } catch {}
+}
+
 async function virusScan(filePath: string): Promise<{ clean: boolean; threat?: string }> {
   const progFiles = process.env.ProgramFiles || "C:\\Program Files";
   const mpCmdRun = path.join(progFiles, "Windows Defender", "MpCmdRun.exe");
@@ -1631,42 +1667,22 @@ discord.on(Events.InteractionCreate, (interaction) => {
         const buffer = Buffer.from(await response.arrayBuffer());
         fs.writeFileSync(tmpPath, buffer);
 
+        if (!fs.existsSync(tmpPath)) {
+          await handleMaliciousFile(interaction, safeName, "Windows Defender real-time protection", tmpPath);
+          return;
+        }
+
         await interaction.editReply({ content: "🔎 Scanning file for threats..." });
 
         const scanResult = await virusScan(tmpPath);
 
         if (!scanResult.clean) {
-          try { fs.unlinkSync(tmpPath); } catch {}
-          logToFile(`[FILE BLOCKED] "${safeName}" from ${interaction.user.tag} — ${scanResult.threat}`);
+          await handleMaliciousFile(interaction, safeName, scanResult.threat!, tmpPath);
+          return;
+        }
 
-          const banInfo = addTempBlacklist(interaction.user.id);
-          const banDurationStr = banInfo.duration >= 60
-            ? `${banInfo.duration / 60}h`
-            : `${banInfo.duration}min`;
-
-          if (OWNER_ID) {
-            try {
-              const owner = await discord.users.fetch(OWNER_ID);
-              const source = interaction.guild
-                ? `**Server:** ${interaction.guild.name}\n**Channel:** <#${interaction.channelId}>`
-                : "**Source:** Direct Messages";
-              await owner.send({
-                content: [
-                  `🚫 **Malicious file blocked & user banned!**`,
-                  `**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)`,
-                  `**File:** \`${safeName}\``,
-                  `**Threat:** ${scanResult.threat}`,
-                  `**Ban duration:** ${banDurationStr}`,
-                  `**Offense #:** ${banInfo.totalOffenses}`,
-                  source,
-                ].join("\n"),
-              });
-            } catch {}
-          }
-
-          await interaction.editReply({
-            content: `🚫 File blocked — threat detected: **${scanResult.threat}**\nYou have been temporarily banned from using this command for **${banDurationStr}**.`
-          });
+        if (!fs.existsSync(tmpPath)) {
+          await handleMaliciousFile(interaction, safeName, "Windows Defender real-time protection", tmpPath);
           return;
         }
 
