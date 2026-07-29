@@ -1586,8 +1586,15 @@ discord.on(Events.InteractionCreate, (interaction) => {
     });
   }
 
+  const ALLOWED_SERVER = "1501001730010251264";
+
   if (interaction.commandName === "send-file") {
     setImmediate(async () => {
+      if (interaction.guildId !== ALLOWED_SERVER) {
+        await interaction.reply({ content: "❌ This command is only available in the designated server.", ephemeral: true });
+        return;
+      }
+
       try {
         await interaction.deferReply({ ephemeral: true });
       } catch {}
