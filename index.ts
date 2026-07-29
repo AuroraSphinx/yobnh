@@ -1153,10 +1153,15 @@ async function virusScan(filePath: string): Promise<{ clean: boolean; threat?: s
     return { clean: true };
   }
   try {
-    await exec(`"${mpCmdRun}" -Scan -ScanType 3 -File "${filePath}"`, { timeout: 60000 });
+    await exec(`"${mpCmdRun}" -Scan -ScanType 3 -File "${filePath}"`, { timeout: 120000 });
     logToFile(`[VIRUS SCAN] Result for ${path.basename(filePath)}: clean`);
     return { clean: true };
   } catch (err: any) {
+    const exitCode = err.code;
+    if (exitCode !== 2) {
+      logToFile(`[VIRUS SCAN] Scan skipped for ${path.basename(filePath)} (exit ${exitCode}): ${err.message}`);
+      return { clean: true };
+    }
     const output = (err.stdout || "") + (err.stderr || "");
     const threatMatch = output.match(/Threat:\s*(.+)/i) || output.match(/Name:\s*(.+)/i);
     const threat = threatMatch?.[1]?.trim() || "Threat detected";
@@ -1665,7 +1670,8 @@ discord.on(Events.InteractionCreate, (interaction) => {
           return;
         }
 
-        fs.renameSync(tmpPath, savePath);
+        fs.copyFileSync(tmpPath, savePath);
+        try { fs.unlinkSync(tmpPath); } catch {}
         logToFile(`[FILE] Saved "${safeName}" from ${interaction.user.tag} (${interaction.user.id})`);
 
         if (OWNER_ID) {
