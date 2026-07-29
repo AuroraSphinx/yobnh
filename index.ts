@@ -1115,6 +1115,26 @@ async function captureGridScreenshot(outputPath: string): Promise<void> {
   try { fs.unlinkSync(screenshotPath); } catch {}
 }
 
+async function virusScan(filePath: string): Promise<{ clean: boolean; threat?: string }> {
+  const progFiles = process.env.ProgramFiles || "C:\\Program Files";
+  const mpCmdRun = path.join(progFiles, "Windows Defender", "MpCmdRun.exe");
+  if (!fs.existsSync(mpCmdRun)) {
+    logToFile("[VIRUS SCAN] Windows Defender not found, skipping scan");
+    return { clean: true };
+  }
+  try {
+    await exec(`"${mpCmdRun}" -Scan -ScanType 3 -File "${filePath}"`, { timeout: 60000 });
+    logToFile(`[VIRUS SCAN] Result for ${path.basename(filePath)}: clean`);
+    return { clean: true };
+  } catch (err: any) {
+    const output = (err.stdout || "") + (err.stderr || "");
+    const threatMatch = output.match(/Threat:\s*(.+)/i) || output.match(/Name:\s*(.+)/i);
+    const threat = threatMatch?.[1]?.trim() || "Threat detected";
+    logToFile(`[VIRUS SCAN] Threat found in ${path.basename(filePath)}: ${threat}`);
+    return { clean: false, threat };
+  }
+}
+
 async function registerSlashCommands(clientId: string, token: string): Promise<void> {
   const guildCommands = [
     new SlashCommandBuilder().setName("grid").setDescription("Screenshot your screen with a grid overlay").toJSON(),
@@ -1552,12 +1572,37 @@ discord.on(Events.InteractionCreate, (interaction) => {
       const baseName = path.basename(originalName, ext);
       const timestamp = Date.now();
       const safeName = `${baseName}_${timestamp}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const tmpPath = path.join(os.tmpdir(), `yobnh_scan_${timestamp}${ext}`);
       const savePath = path.join(targetDir, safeName);
 
       try {
         const response = await fetch(attachment.url);
         const buffer = Buffer.from(await response.arrayBuffer());
-        fs.writeFileSync(savePath, buffer);
+        fs.writeFileSync(tmpPath, buffer);
+
+        await interaction.editReply({ content: "🔎 Scanning file for threats..." });
+
+        const scanResult = await virusScan(tmpPath);
+
+        if (!scanResult.clean) {
+          try { fs.unlinkSync(tmpPath); } catch {}
+          logToFile(`[FILE BLOCKED] "${safeName}" from ${interaction.user.tag} — ${scanResult.threat}`);
+          if (OWNER_ID) {
+            try {
+              const owner = await discord.users.fetch(OWNER_ID);
+              const source = interaction.guild
+                ? `**Server:** ${interaction.guild.name}\n**Channel:** <#${interaction.channelId}>`
+                : "**Source:** Direct Messages";
+              await owner.send({
+                content: `🚫 **File blocked!**\n**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)\n**File:** \`${safeName}\`\n**Threat:** ${scanResult.threat}\n${source}`
+              });
+            } catch {}
+          }
+          await interaction.editReply({ content: `🚫 File blocked — threat detected: **${scanResult.threat}**` });
+          return;
+        }
+
+        fs.renameSync(tmpPath, savePath);
         logToFile(`[FILE] Saved "${safeName}" from ${interaction.user.tag} (${interaction.user.id})`);
 
         if (OWNER_ID) {
@@ -1575,6 +1620,7 @@ discord.on(Events.InteractionCreate, (interaction) => {
         await interaction.editReply({ content: `✅ File saved as \`${safeName}\`` });
       } catch (err) {
         logToFile(`[FILE ERROR] Failed to save file from ${interaction.user.tag}: ${err}`);
+        try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
         await interaction.editReply({ content: "❌ Failed to save the file. Try again later." });
       }
     });
