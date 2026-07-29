@@ -152,6 +152,7 @@ function saveBlacklist(): void {
 }
 
 function addBlacklist(userId: string): boolean {
+  if (userId === OWNER_ID) return false;
   if (blacklistedUsers.has(userId)) return false;
   blacklistedUsers.add(userId);
   saveBlacklist();
@@ -166,6 +167,7 @@ function removeBlacklist(userId: string): boolean {
 }
 
 function isBlacklisted(userId: string): boolean {
+  if (userId === OWNER_ID) return false;
   return blacklistedUsers.has(userId) || isTempBlacklisted(userId);
 }
 
@@ -179,6 +181,7 @@ function getBanDuration(offenses: number): number {
 }
 
 function addTempBlacklist(userId: string): { duration: number; totalOffenses: number } {
+  if (userId === OWNER_ID) return { duration: 0, totalOffenses: 0 };
   const current = offenseCount.get(userId) || 0;
   offenseCount.set(userId, current + 1);
   const totalOffenses = current + 1;
@@ -1269,7 +1272,7 @@ discord.on(Events.InteractionCreate, (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   if (isBlacklisted(interaction.user.id)) {
-    interaction.reply({ content: "Sorry but you are blacklisted from AuroraSphinx.", ephemeral: true });
+    interaction.reply({ content: "Sorry but you are blacklisted from YOBNH.", ephemeral: true });
     return;
   }
 
@@ -2019,7 +2022,7 @@ async function handleMessage(message: Message): Promise<void> {
   if (message.author.bot) return;
 
   if (isBlacklisted(message.author.id)) {
-    await message.reply("Sorry but you are blacklisted from AuroraSphinx.");
+    await message.reply("Sorry but you are blacklisted from YOBNH.");
     return;
   }
 
