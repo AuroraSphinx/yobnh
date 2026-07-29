@@ -1586,34 +1586,43 @@ discord.on(Events.InteractionCreate, (interaction) => {
     });
   }
 
-  const ALLOWED_SERVER = "1501001730010251264";
-
   if (interaction.commandName === "send-file") {
+    const allowedServer = "1501001730010251264";
     setImmediate(async () => {
-      if (interaction.guildId !== ALLOWED_SERVER) {
+      if (interaction.guildId !== allowedServer) {
         await interaction.reply({ content: "❌ This command is only available in the designated server.", ephemeral: true });
         return;
       }
 
       try {
         await interaction.deferReply({ ephemeral: true });
-      } catch {}
+      } catch {
+        logToFile("[FILE ERROR] Failed to defer reply for send-file");
+        return;
+      }
 
-      const attachment = interaction.options.getAttachment("file", true);
-
-      const targetDir = path.join(process.cwd(), "yobnh", "community-files", "files-sent");
-      fs.mkdirSync(targetDir, { recursive: true });
-
-      const originalName = attachment.name;
-      const ext = path.extname(originalName);
-      const baseName = path.basename(originalName, ext);
-      const timestamp = Date.now();
-      const safeName = `${baseName}_${timestamp}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const tmpPath = path.join(os.tmpdir(), `yobnh_scan_${timestamp}${ext}`);
-      const savePath = path.join(targetDir, safeName);
-
+      let tmpPath = "";
       try {
-        const response = await fetch(attachment.url);
+        const attachment = interaction.options.getAttachment("file", true);
+
+        const targetDir = path.join(process.cwd(), "yobnh", "community-files", "files-sent");
+        fs.mkdirSync(targetDir, { recursive: true });
+
+        const originalName = attachment.name;
+        const ext = path.extname(originalName);
+        const baseName = path.basename(originalName, ext);
+        const timestamp = Date.now();
+        const safeName = `${baseName}_${timestamp}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+        tmpPath = path.join(os.tmpdir(), `yobnh_scan_${timestamp}${ext}`);
+        const savePath = path.join(targetDir, safeName);
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 120000);
+        const response = await fetch(attachment.url, { signal: controller.signal });
+        clearTimeout(timeout);
+
+        if (!response.ok) throw new Error(`HTTP ${response.status} fetching attachment`);
+
         const buffer = Buffer.from(await response.arrayBuffer());
         fs.writeFileSync(tmpPath, buffer);
 
@@ -1675,7 +1684,7 @@ discord.on(Events.InteractionCreate, (interaction) => {
       } catch (err) {
         logToFile(`[FILE ERROR] Failed to save file from ${interaction.user.tag}: ${err}`);
         try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
-        await interaction.editReply({ content: "❌ Failed to save the file. Try again later." });
+        try { await interaction.editReply({ content: "❌ Failed to save the file. Try again later." }); } catch {}
       }
     });
   }
