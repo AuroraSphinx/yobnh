@@ -117,6 +117,7 @@ RULES FOR ACTIONS (If you explicitly need to use a tool):
 - search images: {"action":"search_images","query":"..."}
 - If you need to perform actions, you can send a SINGLE action or an ARRAY of actions to execute them sequentially.
 - Your response must be ONLY valid JSON with NO conversational text around it ONLY when using actions.
+- IMPORTANT: You do NOT have mouse, click, or keyboard control. NEVER output mouse_move, mouse_click, or any mouse-related actions. If someone asks you to "open a browser", use the open action with the URL. If someone asks for images, use the search_images action.
 
 Example format for sequential actions:
 [
@@ -2376,6 +2377,11 @@ async function executeSingleAction(parsed, channel, userId, channelId) {
         catch (err) {
             await channel.send(`⚠️ Image search failed: ${err instanceof Error ? err.message : String(err)}`);
         }
+    }
+    const handledActions = ["launch", "kick", "timeout", "untimeout", "ban", "unban", "search_images"];
+    if (!parsed || typeof parsed !== "object" || !handledActions.includes(parsed.action)) {
+        await channel.send(`⚠️ I don't have the "${parsed?.action || "that"}" ability anymore, so I couldn't do that. Try describing what you want instead.`);
+        addToHistory(channelId, userId, "assistant", `Action "${parsed?.action || "unknown"}" is no longer supported.`);
     }
 }
 async function handleMessage(message) {
