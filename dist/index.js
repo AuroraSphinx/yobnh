@@ -2328,6 +2328,15 @@ discord.once(discord_js_1.Events.ClientReady, async (client) => {
     logToFile(`[BOT] Guilds: ${client.guilds.cache.size}`);
     logToFile(`[BOT] Prefix: "${PREFIX}"`);
     try {
+        await client.user.setPresence({
+            status: discord_js_1.PresenceUpdateStatus.Online,
+            activities: [{ name: `${BOT_NAME} ${BOT_VERSION}`, type: discord_js_1.ActivityType.Custom }],
+        });
+    }
+    catch (err) {
+        console.error("Failed to set bot presence:", err);
+    }
+    try {
         const app = await client.application.fetch();
         if (app.owner) {
             if (app.owner instanceof discord_js_1.Team) {

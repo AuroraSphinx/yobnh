@@ -12,7 +12,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import readline from "readline";
-import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, EmbedBuilder, Team, ButtonBuilder, ButtonStyle, ActionRowBuilder, ComponentType, ChatInputCommandInteraction } from "discord.js";
+import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, EmbedBuilder, Team, ButtonBuilder, ButtonStyle, ActionRowBuilder, ComponentType, ChatInputCommandInteraction, ActivityType, PresenceUpdateStatus } from "discord.js";
 import { OpenAI } from "openai";
 import { chromium, Browser, Page } from "playwright";
 import { exec as execCb, spawn, execFile } from "child_process";
@@ -2321,6 +2321,15 @@ discord.once(Events.ClientReady, async (client) => {
   logToFile(`[BOT] Logged in as ${client.user.tag}`);
   logToFile(`[BOT] Guilds: ${client.guilds.cache.size}`);
   logToFile(`[BOT] Prefix: "${PREFIX}"`);
+
+  try {
+    await client.user.setPresence({
+      status: PresenceUpdateStatus.Online,
+      activities: [{ name: `${BOT_NAME} ${BOT_VERSION}`, type: ActivityType.Custom }],
+    });
+  } catch (err) {
+    console.error("Failed to set bot presence:", err);
+  }
 
   try {
     const app = await client.application!.fetch();
