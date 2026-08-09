@@ -21,6 +21,9 @@ import pidusage from "pidusage"; // Import pidusage to track system performance 
 
 const exec = promisify(execCb);
 const username = os.userInfo().username;
+import pkg from "./package.json";
+const BOT_NAME = "YOBNH Bot";
+const BOT_VERSION = `v${pkg.version}`;
 
 // --- Environment Variable Loader (.env support) --------------------------------
 function loadEnvFile(): void {
@@ -1973,7 +1976,7 @@ discord.on(Events.InteractionCreate, (interaction) => {
         const statusIcon = isThrottled ? "Throttled" : "Normal";
 
         const embed = new EmbedBuilder()
-          .setTitle("Bot Health Check")
+          .setTitle(`${BOT_NAME} ${BOT_VERSION}`)
           .setColor(healthColor)
           .addFields(
             { name: "Status", value: `**${healthStatus}**`, inline: true },

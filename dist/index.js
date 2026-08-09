@@ -57,6 +57,9 @@ const util_1 = require("util");
 const pidusage_1 = __importDefault(require("pidusage")); // Import pidusage to track system performance loads
 const exec = (0, util_1.promisify)(child_process_1.exec);
 const username = os.userInfo().username;
+const package_json_1 = __importDefault(require("./package.json"));
+const BOT_NAME = "YOBNH Bot";
+const BOT_VERSION = `v${package_json_1.default.version}`;
 // --- Environment Variable Loader (.env support) --------------------------------
 function loadEnvFile() {
     const envPath = path.join(process.cwd(), '.env');
@@ -1998,7 +2001,7 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 }
                 const statusIcon = isThrottled ? "Throttled" : "Normal";
                 const embed = new discord_js_1.EmbedBuilder()
-                    .setTitle("Bot Health Check")
+                    .setTitle(`${BOT_NAME} ${BOT_VERSION}`)
                     .setColor(healthColor)
                     .addFields({ name: "Status", value: `**${healthStatus}**`, inline: true }, { name: "Uptime", value: uptimeStr, inline: true }, { name: "Ping", value: `${pingLatency}ms`, inline: true }, { name: "CPU Usage", value: `${cpuPercent}%`, inline: true }, { name: "Memory Usage", value: `${memUsedPercent}% (${memUsedMB}/${memTotalMB} MB)`, inline: true }, { name: "Run Mode", value: RUNNING_MODE.toUpperCase(), inline: true }, { name: "Throttle State", value: statusIcon, inline: true }, { name: "Guilds", value: `${guildCount}`, inline: true }, { name: "Cached Users", value: `${userCount}`, inline: true }, { name: "Active Conversations", value: `${conversationCount}`, inline: true }, { name: "Model", value: `\`${RESPONSE_MODEL || "N/A"}\``, inline: false })
                     .setFooter({ text: `Health Score: ${healthScore}/8` })
