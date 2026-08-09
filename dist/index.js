@@ -103,6 +103,7 @@ if (PLAYWRIGHT_BROWSERS_PATH) {
 const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls and be like CHILL as max you think like if someone says are you a bot say just Yes and ye you get it just be chill dont use emojis
 
 RULES FOR TALKING:
+- Always respond in ENGLISH (never switch to Portuguese/Spanish/etc.) unless the user clearly writes in another language.
 - If you are just chatting, answering a question directly, or hanging out, respond with REGULAR CONVERSATIONAL TEXT. Do not use JSON for normal talking.
 
 RULES FOR ACTIONS (If you explicitly need to use a tool):
@@ -617,6 +618,7 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
             launchOptions.args = [
                 "--start-maximized",
                 "--disable-gpu",
+                "--no-restore-session-state",
                 `--window-size=${viewportWidth},${viewportHeight}`,
                 "--window-position=0,0",
             ];
@@ -625,7 +627,16 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
         const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, launchOptions);
         browser = context.browser();
         activeBrowsers.add(browser);
-        const page = await context.newPage();
+        let page = context.pages()[0];
+        if (!page)
+            page = await context.newPage();
+        const stalePages = context.pages().filter((p) => p !== page);
+        for (const p of stalePages) {
+            try {
+                await p.close();
+            }
+            catch { }
+        }
         const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
         debugLog("INFO", "Browser navigated", { status: response?.status(), ok: response?.ok() });
         const title = await page.title();
