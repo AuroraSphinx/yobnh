@@ -1,7 +1,7 @@
 // Silence the annoying DEP0190 child_process warning globally
 process.removeAllListeners('warning'); 
 process.on('warning', (warning) => {
-  if (warning.name === 'DeprecationWarning' && warning.message.includes('DEP0190')) {
+  if (warning.name === 'DeprecationWarning' && (warning as any).code === 'DEP0190') {
     return; // Ignore it completely
   }
   console.warn(warning.stack); // Let other important warnings through
@@ -2176,6 +2176,7 @@ discord.on(Events.InteractionCreate, (interaction) => {
 discord.once(Events.ClientReady, async (client) => {
   logToFile(`[BOT] Logged in as ${client.user.tag}`);
   logToFile(`[BOT] Guilds: ${client.guilds.cache.size}`);
+  logToFile(`[BOT] Prefix: "${PREFIX}"`);
 
   try {
     const app = await client.application!.fetch();

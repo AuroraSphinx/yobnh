@@ -39,7 +39,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 // Silence the annoying DEP0190 child_process warning globally
 process.removeAllListeners('warning');
 process.on('warning', (warning) => {
-    if (warning.name === 'DeprecationWarning' && warning.message.includes('DEP0190')) {
+    if (warning.name === 'DeprecationWarning' && warning.code === 'DEP0190') {
         return; // Ignore it completely
     }
     console.warn(warning.stack); // Let other important warnings through
@@ -2186,6 +2186,7 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
 discord.once(discord_js_1.Events.ClientReady, async (client) => {
     logToFile(`[BOT] Logged in as ${client.user.tag}`);
     logToFile(`[BOT] Guilds: ${client.guilds.cache.size}`);
+    logToFile(`[BOT] Prefix: "${PREFIX}"`);
     try {
         const app = await client.application.fetch();
         if (app.owner) {
