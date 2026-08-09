@@ -2560,6 +2560,14 @@ async function handleMessage(message: Message): Promise<void> {
     return;
   }
 
+  if (prefixCommand === "ping") {
+    const sent = await message.reply("🏓 Pinging...");
+    const roundtrip = sent.createdTimestamp - message.createdTimestamp;
+    const wsPing = typeof discord.ws?.ping === "number" ? discord.ws.ping : "N/A";
+    await sent.edit(`🏓 **Pong!**\nWebSocket: \`${wsPing}ms\`\nRoundtrip: \`${roundtrip}ms\``);
+    return;
+  }
+
   logToFile(`[MSG] ${message.author.tag} (${message.author.id}): ${userText}`);
 
   if (typeof channel.sendTyping === "function") await channel.sendTyping();
