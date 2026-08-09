@@ -60,6 +60,13 @@ const username = os.userInfo().username;
 const package_json_1 = __importDefault(require("./package.json"));
 const BOT_NAME = "YOBNH Bot";
 const BOT_VERSION = `v${package_json_1.default.version}`;
+// node_modules/.bin dir + node's own bin dir, so npm/npx resolve even under systemd
+const NODE_BIN_DIR = path.dirname(process.execPath);
+const LOCAL_BIN_DIR = path.join(process.cwd(), "node_modules", ".bin");
+const execEnv = {
+    ...process.env,
+    PATH: [LOCAL_BIN_DIR, NODE_BIN_DIR, process.env.PATH].filter(Boolean).join(path.delimiter),
+};
 // --- Environment Variable Loader (.env support) --------------------------------
 function loadEnvFile() {
     const envPath = path.join(process.cwd(), '.env');
@@ -1698,9 +1705,9 @@ async function updateBotFromGitHub(channel, requestedBy) {
         };
         copyTree(srcDir, process.cwd());
         await send("📦 Installing dependencies (`npm install`)...");
-        await exec("npm install", { cwd: process.cwd(), timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
+        await exec("npm install", { cwd: process.cwd(), env: execEnv, timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
         await send("🏗️ Building (`npm run build`)...");
-        await exec("npm run build", { cwd: process.cwd(), timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
+        await exec("npm run build", { cwd: process.cwd(), env: execEnv, timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
         logToFile(`[UPDATE] Bot updated to ${latestSha.slice(0, 7)} (${latestMessage}) by ${requestedBy}`);
         conversations.clear();
         await send("✅ **Update complete!** Restarting the bot...");
@@ -1812,17 +1819,20 @@ function restartBot() {
     try {
         const launchScript = process.argv[1] || "";
         const isCompiled = /(^|[\\/])dist[\\/]index\.js$/i.test(launchScript);
+        const npxBin = process.platform === "win32" ? "npx.cmd" : "npx";
+        const nodePath = process.execPath;
+        const npxPath = path.join(NODE_BIN_DIR, npxBin);
         if (process.platform !== "win32") {
             const runCmd = isCompiled
-                ? `cd "${cwd}" && nohup node dist/index.js ${modeArg} >> logs.txt 2>&1 &`
-                : `cd "${cwd}" && nohup npx ts-node index.ts ${modeArg} >> logs.txt 2>&1 &`;
+                ? `cd "${cwd}" && nohup ${nodePath} dist/index.js ${modeArg} >> logs.txt 2>&1 &`
+                : `cd "${cwd}" && PATH="${execEnv.PATH}" nohup ${npxPath} ts-node index.ts ${modeArg} >> logs.txt 2>&1 &`;
             (0, child_process_1.spawn)("sh", ["-c", runCmd], { detached: true, stdio: "ignore" }).unref();
             logToFile("[UPDATE] Restart scheduled (linux nohup).");
         }
         else {
             const cmd = isCompiled
-                ? `start "YOBNH" /D "${cwd}" node "${path.join(cwd, "dist", "index.js")}" ${modeArg}`
-                : `start "YOBNH" /D "${cwd}" npx ts-node index.ts ${modeArg}`;
+                ? `start "YOBNH" /D "${cwd}" "${nodePath}" "${path.join(cwd, "dist", "index.js")}" ${modeArg}`
+                : `start "YOBNH" /D "${cwd}" "${npxPath}" ts-node index.ts ${modeArg}`;
             (0, child_process_1.spawn)("cmd.exe", ["/c", cmd], { detached: true, stdio: "ignore" }).unref();
             logToFile(`[UPDATE] Restart scheduled (${isCompiled ? "dist" : "ts-node"}): ${cmd}`);
         }
