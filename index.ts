@@ -1912,11 +1912,13 @@ discord.on(Events.InteractionCreate, (interaction) => {
   }
 
   if (interaction.commandName === "language") {
-    const mode = interaction.options.getString("mode", true) as "english" | "owo";
-    saveLanguage(mode);
-    const label = mode === "owo" ? "OwO" : "English";
-    logToFile(`[LANGUAGE] Changed to ${label} by ${interaction.user.tag}`);
-    await interaction.reply({ content: `✅ Language set to **${label}**!`, ephemeral: true });
+    setImmediate(async () => {
+      const mode = interaction.options.getString("mode", true) as "english" | "owo";
+      saveLanguage(mode);
+      const label = mode === "owo" ? "OwO" : "English";
+      logToFile(`[LANGUAGE] Changed to ${label} by ${interaction.user.tag}`);
+      await interaction.reply({ content: `✅ Language set to **${label}**!`, ephemeral: true });
+    });
     return;
   }
 
