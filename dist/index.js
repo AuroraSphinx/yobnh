@@ -1633,6 +1633,7 @@ async function updateBotFromGitHub(channel, requestedBy) {
         await send("🏗️ Building (`npm run build`)...");
         await exec("npm run build", { cwd: process.cwd(), timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
         logToFile(`[UPDATE] Bot updated to ${latestSha.slice(0, 7)} (${latestMessage}) by ${requestedBy}`);
+        conversations.clear();
         await send("✅ **Update complete!** Restarting the bot...");
         restartBot();
     }
@@ -1646,12 +1647,16 @@ async function updateBotFromGitHub(channel, requestedBy) {
     }
 }
 function restartBot() {
+    const cwd = process.cwd();
+    const modeArg = `--mode=${RUNNING_MODE}`;
     try {
-        const script = path.join(process.cwd(), "dist", "index.js");
-        const modeArg = `--mode=${RUNNING_MODE}`;
-        const cmd = `start "YOBNH" /D "${process.cwd()}" node "${script}" ${modeArg}`;
+        const launchScript = process.argv[1] || "";
+        const isCompiled = /(^|[\\/])dist[\\/]index\.js$/i.test(launchScript);
+        const cmd = isCompiled
+            ? `start "YOBNH" /D "${cwd}" node "${path.join(cwd, "dist", "index.js")}" ${modeArg}`
+            : `start "YOBNH" /D "${cwd}" npx ts-node index.ts ${modeArg}`;
         (0, child_process_1.spawn)("cmd.exe", ["/c", cmd], { detached: true, stdio: "ignore" }).unref();
-        logToFile("[UPDATE] Restart scheduled in a new console window.");
+        logToFile(`[UPDATE] Restart scheduled (${isCompiled ? "dist" : "ts-node"}): ${cmd}`);
     }
     catch (err) {
         logToFile(`[UPDATE] Restart failed: ${err}`);
@@ -1856,10 +1861,10 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 // Handle array of actions (e.g. [{"action":"search_images","query":"..."}])
                 if (Array.isArray(parsed)) {
                     logToFile(`[ASK PARSED ARRAY] ${JSON.stringify(parsed)}`);
-                    const imageAction = parsed.find((a) => a.action === "search_images");
-                    if (imageAction) {
-                        parsed = imageAction;
-                        logToFile(`[ASK EXTRACTED search_images] ${JSON.stringify(parsed)}`);
+                    const supportedAction = parsed.find((a) => ["search_images", "search", "open"].includes(a?.action));
+                    if (supportedAction) {
+                        parsed = supportedAction;
+                        logToFile(`[ASK EXTRACTED ${supportedAction.action}] ${JSON.stringify(parsed)}`);
                     }
                 }
                 if (parsed?.action === "search_images" && parsed.query) {
@@ -2384,6 +2389,107 @@ async function executeSingleAction(parsed, channel, userId, channelId) {
         addToHistory(channelId, userId, "assistant", `Action "${parsed?.action || "unknown"}" is no longer supported.`);
     }
 }
+async function performSearchAction(query, channel) {
+    if (typeof channel.sendTyping === "function")
+        await channel.sendTyping();
+    try {
+        await channel.send(`🔎 Searching for: "${query}"...`);
+        const results = await searchDuckDuckGo(query);
+        return results.length
+            ? `Search results for "${query}":\n${results
+                .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
+                .join("\n\n")}`
+            : `No DuckDuckGo results found for "${query}".`;
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+        return null;
+    }
+}
+async function performOpenAction(parsed, channel, userText) {
+    const rawUrl = String(parsed.url);
+    const cleaned = sanitizeUrl(rawUrl);
+    let browserData = null;
+    if (!cleaned) {
+        await channel.send("⚠️ The assistant returned an invalid URL to open. Please provide a valid `https://...` URL.");
+    }
+    else if (/duckduckgo\.com/i.test(cleaned)) {
+        let ddgQuery = userText;
+        try {
+            ddgQuery = new URL(cleaned).searchParams.get("q") || userText;
+        }
+        catch { }
+        if (typeof channel.sendTyping === "function")
+            await channel.sendTyping();
+        try {
+            await channel.send(`🔎 Searching for: "${ddgQuery}"...`);
+            const results = await searchDuckDuckGo(ddgQuery);
+            browserData = results.length
+                ? `Search results for "${ddgQuery}":\n${results
+                    .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
+                    .join("\n\n")}`
+                : `No DuckDuckGo results found for "${ddgQuery}".`;
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+        }
+    }
+    else if (/^(https?:\/\/)?(www\.)?duckduckgo\.com\/?$/i.test(cleaned)) {
+        if (typeof channel.sendTyping === "function")
+            await channel.sendTyping();
+        try {
+            await channel.send(`🔎 Searching for: "${userText}"...`);
+            const results = await searchDuckDuckGo(userText);
+            browserData = results.length
+                ? `Search results for "${userText}":\n${results
+                    .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
+                    .join("\n\n")}`
+                : `No DuckDuckGo results found for "${userText}".`;
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+        }
+    }
+    else {
+        let systemOpened = false;
+        const flags = parseOpenFlags(userText);
+        const useSystemBrowser = Boolean(flags.forceSystem && !flags.forceChromium);
+        const preferVisible = !flags.forceHeadless;
+        if (useSystemBrowser) {
+            try {
+                await openWithSystem(cleaned);
+                systemOpened = true;
+                await channel.send(`🌐 Opened in your system default browser: ${cleaned}`);
+            }
+            catch (sysErr) { }
+        }
+        if (typeof channel.sendTyping === "function")
+            await channel.sendTyping();
+        try {
+            const mode = preferVisible ? "visible" : "headless";
+            await channel.send(`🌐 Launching Playwright Chromium for: ${cleaned} (${mode} mode)`);
+            const page = await browseUrl(cleaned, preferVisible, 1600, 900);
+            browserData = `Opened page: ${page.title}\nURL: ${page.url}\n\n${page.content}`;
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (!systemOpened) {
+                try {
+                    await channel.send(`🌐 Playwright failed, trying visible browser window...`);
+                    const page = await browseUrl(cleaned, true, 1600, 900);
+                    browserData = `Opened page (visible): ${page.title}\nURL: ${page.url}\n\n${page.content}`;
+                }
+                catch (err2) {
+                    await channel.send(`⚠️ I failed to open Playwright Chromium: ${msg}.`);
+                }
+            }
+        }
+    }
+    return browserData;
+}
 async function handleMessage(message) {
     if (message.author.bot)
         return;
@@ -2437,150 +2543,39 @@ async function handleMessage(message) {
     if (parsed) {
         logToFile(`[PARSED ACTION] ${JSON.stringify(parsed)}`);
         addToHistory(channelId, userId, "assistant", reply);
-        if (Array.isArray(parsed)) {
-            for (const item of parsed) {
-                await executeSingleAction(item, channel, userId, channelId);
+        const items = (Array.isArray(parsed) ? parsed : [parsed]).filter((item) => item && typeof item === "object");
+        let browserData = null;
+        let needsFollowUp = false;
+        for (const item of items) {
+            const action = item?.action;
+            if (action === "search" && item.query) {
+                needsFollowUp = true;
+                const data = await performSearchAction(item.query, channel);
+                if (data)
+                    browserData = data;
             }
-            return;
-        }
-        else if (parsed.action === "launch" || parsed.action === "kick" || parsed.action === "timeout" || parsed.action === "untimeout" || parsed.action === "ban" || parsed.action === "unban" || parsed.action === "search_images") {
-            await executeSingleAction(parsed, channel, userId, channelId);
-            return;
-        }
-    }
-    let browserData = null;
-    if (parsed?.action === "search" && parsed.query) {
-        if (typeof channel.sendTyping === "function")
-            await channel.sendTyping();
-        try {
-            await channel.send(`🔎 Searching for: "${parsed.query}"...`);
-            const results = await searchDuckDuckGo(parsed.query);
-            browserData = results.length
-                ? `Search results for "${parsed.query}":\n${results
-                    .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
-                    .join("\n\n")}`
-                : `No DuckDuckGo results found for "${parsed.query}".`;
-        }
-        catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
-        }
-    }
-    else if (parsed?.action === "search_images" && parsed.query) {
-        logToFile(`[ACTION] search_images: "${parsed.query}"`);
-        if (typeof channel.sendTyping === "function")
-            await channel.sendTyping();
-        try {
-            await channel.send(`🖼️ Searching images for: "${parsed.query}"...`);
-            const imageDataArr = await searchDuckDuckGoImages(parsed.query);
-            if (imageDataArr.length > 0) {
-                logToFile(`[IMAGE SUCCESS] Got ${imageDataArr.length} images`);
-                const attachments = imageDataArr.map(img => new discord_js_1.AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
-                await channel.send({ content: `🖼️ **${parsed.query}** (${imageDataArr.length} images)`, files: attachments });
-                // Cleanup temp files after sending
-                for (const img of imageDataArr) {
-                    try {
-                        fs.unlinkSync(img.imagePath);
-                    }
-                    catch { }
-                }
+            else if (action === "open" && item.url) {
+                needsFollowUp = true;
+                const data = await performOpenAction(item, channel, userText);
+                if (data)
+                    browserData = data;
             }
             else {
-                logToFile(`[IMAGE FAILED] No images found for "${parsed.query}"`);
-                await channel.send(`⚠️ I couldn't find any images for "${parsed.query}".`);
+                await executeSingleAction(item, channel, userId, channelId);
             }
         }
-        catch (err) {
-            logToFile(`[IMAGE ERROR] ${err}`);
-            const msg = err instanceof Error ? err.message : String(err);
-            await channel.send(`⚠️ Image search failed: ${msg}.`);
-        }
-    }
-    else if (parsed?.action === "open" && parsed.url) {
-        const rawUrl = String(parsed.url);
-        const cleaned = sanitizeUrl(rawUrl);
-        if (!cleaned) {
-            await channel.send("⚠️ The assistant returned an invalid URL to open. Please provide a valid `https://...` URL.");
-        }
-        else if (/duckduckgo\.com/i.test(cleaned)) {
-            let ddgQuery = userText;
-            try {
-                ddgQuery = new URL(cleaned).searchParams.get("q") || userText;
+        if (needsFollowUp) {
+            if (browserData) {
+                addToHistory(channelId, userId, "user", `Browser results:\n${browserData}\n\nPlease answer the original question using this information.`);
+                reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
             }
-            catch { }
-            if (typeof channel.sendTyping === "function")
-                await channel.sendTyping();
-            try {
-                await channel.send(`🔎 Searching for: "${ddgQuery}"...`);
-                const results = await searchDuckDuckGo(ddgQuery);
-                browserData = results.length
-                    ? `Search results for "${ddgQuery}":\n${results
-                        .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
-                        .join("\n\n")}`
-                    : `No DuckDuckGo results found for "${ddgQuery}".`;
-            }
-            catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+            addToHistory(channelId, userId, "assistant", reply);
+            const chunks = splitMessage(reply, 2000);
+            for (const chunk of chunks) {
+                await channel.send(chunk);
             }
         }
-        else if (/^(https?:\/\/)?(www\.)?duckduckgo\.com\/?$/i.test(cleaned)) {
-            if (typeof channel.sendTyping === "function")
-                await channel.sendTyping();
-            try {
-                await channel.send(`🔎 Searching for: "${userText}"...`);
-                const results = await searchDuckDuckGo(userText);
-                browserData = results.length
-                    ? `Search results for "${userText}":\n${results
-                        .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
-                        .join("\n\n")}`
-                    : `No DuckDuckGo results found for "${userText}".`;
-            }
-            catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
-            }
-        }
-        else {
-            let systemOpened = false;
-            const flags = parseOpenFlags(userText);
-            const useSystemBrowser = Boolean(flags.forceSystem && !flags.forceChromium);
-            const preferVisible = !flags.forceHeadless;
-            if (useSystemBrowser) {
-                try {
-                    await openWithSystem(cleaned);
-                    systemOpened = true;
-                    await channel.send(`🌐 Opened in your system default browser: ${cleaned}`);
-                }
-                catch (sysErr) { }
-            }
-            if (typeof channel.sendTyping === "function")
-                await channel.sendTyping();
-            try {
-                const mode = preferVisible ? "visible" : "headless";
-                await channel.send(`🌐 Launching Playwright Chromium for: ${cleaned} (${mode} mode)`);
-                const page = await browseUrl(cleaned, preferVisible, 1600, 900);
-                browserData = `Opened page: ${page.title}\nURL: ${page.url}\n\n${page.content}`;
-            }
-            catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                if (!systemOpened) {
-                    try {
-                        await channel.send(`🌐 Playwright failed, trying visible browser window...`);
-                        const page = await browseUrl(cleaned, true, 1600, 900);
-                        browserData = `Opened page (visible): ${page.title}\nURL: ${page.url}\n\n${page.content}`;
-                    }
-                    catch (err2) {
-                        await channel.send(`⚠️ I failed to open Playwright Chromium: ${msg}.`);
-                    }
-                }
-            }
-        }
-    }
-    if (browserData) {
-        addToHistory(channelId, userId, "assistant", reply);
-        addToHistory(channelId, userId, "user", `Browser results:\n${browserData}\n\nPlease answer the original question using this information.`);
-        reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
+        return;
     }
     addToHistory(channelId, userId, "assistant", reply);
     const chunks = splitMessage(reply, 2000);
