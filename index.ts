@@ -1508,9 +1508,12 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
     new SlashCommandBuilder().setName("clearmemory").setDescription("Reset your conversation history with the AI").toJSON(),
     new SlashCommandBuilder()
       .setName("update-channel")
-      .setDescription("Set a channel to receive latest commit updates from the repo")
+      .setDescription("Set a channel to automatically receive new commits from the repo")
       .addChannelOption(option =>
         option.setName("channel").setDescription("The channel to post commit updates to").setRequired(true)
+      )
+      .addBooleanOption(option =>
+        option.setName("disable").setDescription("Turn off automatic commit updates").setRequired(false)
       )
       .setDMPermission(false)
       .toJSON(),
@@ -1650,6 +1653,100 @@ async function updateBotFromGitHub(channel: any, requestedBy: string): Promise<v
     try { await send(`❌ **Update failed:**\n\`\`\`${msg}\`\`\``); } catch {}
   }
 }
+
+// --- Auto Update Channel (posts new commits to a channel) ---
+const UPDATE_CHANNEL_FILE = path.join(process.cwd(), "update_channel.json");
+
+function loadUpdateChannelConfig(): { channelId: string | null; lastSha: string | null } {
+  try {
+    if (fs.existsSync(UPDATE_CHANNEL_FILE)) {
+      const data = JSON.parse(fs.readFileSync(UPDATE_CHANNEL_FILE, "utf8"));
+      return { channelId: data.channelId ?? null, lastSha: data.lastSha ?? null };
+    }
+  } catch {}
+  return { channelId: null, lastSha: null };
+}
+
+function saveUpdateChannelConfig(config: { channelId: string | null; lastSha: string | null }): void {
+  try {
+    fs.writeFileSync(UPDATE_CHANNEL_FILE, JSON.stringify(config, null, 2));
+  } catch {}
+}
+
+async function fetchLatestCommits(perPage = 10): Promise<any[]> {
+  const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=${perPage}`;
+  const resp = await fetch(apiUrl, {
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "yobnh-bot",
+    },
+  });
+  if (!resp.ok) throw new Error(`GitHub API returned ${resp.status}`);
+  return await resp.json();
+}
+
+function buildCommitEmbeds(commits: any[]): EmbedBuilder[] {
+  return commits.map((c: any) => {
+    const authorName = c.commit?.author?.name || c.commit?.committer?.name || "Unknown";
+    const authorAvatar = c.author?.avatar_url || null;
+    const sha = c.sha.slice(0, 7);
+    const fullMessage = String(c.commit?.message || "");
+    const [firstLine, ...bodyLines] = fullMessage.split("\n");
+    const bodyText = bodyLines.join("\n").replace(/\s+/g, " ").trim();
+    const dateStr = c.commit?.author?.date ? new Date(c.commit.author.date).toLocaleString() : "Unknown";
+
+    return new EmbedBuilder()
+      .setColor(0x57F287)
+      .setAuthor({ name: authorName, iconURL: authorAvatar || undefined })
+      .setTitle(firstLine || "(no commit message)")
+      .setURL(c.html_url || undefined)
+      .setDescription(bodyText.length > 0 ? bodyText.slice(0, 1000) : null)
+      .addFields(
+        { name: "Commit", value: `\`${sha}\``, inline: true },
+        { name: "Date", value: dateStr, inline: true }
+      )
+      .setTimestamp();
+  });
+}
+
+async function sendEmbedsToChannel(channelId: string, embeds: EmbedBuilder[]): Promise<void> {
+  const target = discord.channels.cache.get(channelId);
+  if (!target || !("send" in target)) throw new Error("configured channel is not accessible");
+  for (let i = 0; i < embeds.length; i += 10) {
+    const batch = embeds.slice(i, i + 10);
+    await (target as any).send({ embeds: batch });
+  }
+}
+
+async function postNewCommitsToChannel(channelId: string): Promise<number> {
+  const config = loadUpdateChannelConfig();
+  const commits = await fetchLatestCommits(10);
+  const newCommits: any[] = [];
+  for (const c of commits) {
+    if (c.sha === config.lastSha) break;
+    newCommits.push(c);
+  }
+  if (!newCommits.length) return 0;
+  await sendEmbedsToChannel(channelId, buildCommitEmbeds(newCommits));
+  saveUpdateChannelConfig({ channelId, lastSha: newCommits[0].sha });
+  return newCommits.length;
+}
+
+async function autoPostCommits(): Promise<void> {
+  const config = loadUpdateChannelConfig();
+  if (!config.channelId) return;
+  if (!GITHUB_TOKEN) return;
+  try {
+    const count = await postNewCommitsToChannel(config.channelId);
+    if (count > 0) logToFile(`[UPDATE CHANNEL] Auto-posted ${count} new commit(s).`);
+  } catch (err) {
+    logToFile(`[UPDATE CHANNEL] Auto-post failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+setInterval(() => { autoPostCommits(); }, 5 * 60 * 1000);
+setTimeout(() => { autoPostCommits(); }, 15000);
 
 function restartBot(): void {
   const cwd = process.cwd();
@@ -1976,6 +2073,14 @@ discord.on(Events.InteractionCreate, (interaction) => {
         }
       }
 
+      const disable = interaction.options.getBoolean("disable") ?? false;
+
+      if (disable) {
+        saveUpdateChannelConfig({ channelId: null, lastSha: null });
+        await interaction.editReply({ content: "✅ Automatic commit updates are now **disabled**." });
+        return;
+      }
+
       const targetChannel = interaction.options.getChannel("channel", true);
 
       if (!GITHUB_TOKEN) {
@@ -1989,77 +2094,28 @@ discord.on(Events.InteractionCreate, (interaction) => {
       }
 
       try {
-        const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=10`;
-        const resp = await fetch(apiUrl, {
-          headers: {
-            Authorization: `Bearer ${GITHUB_TOKEN}`,
-            Accept: "application/vnd.github+json",
-            "User-Agent": "yobnh-bot",
-          },
-        });
+        const config = loadUpdateChannelConfig();
+        saveUpdateChannelConfig({ channelId: targetChannel.id, lastSha: config.lastSha });
 
-        if (!resp.ok) {
-          const body = await resp.text();
-          const failEmbed = new EmbedBuilder()
-            .setColor(0xED4245)
-            .setTitle("❌ Commit Fetch Failed")
-            .setDescription(`GitHub API returned \`${resp.status}\`:\n\`\`\`${body.slice(0, 500)}\`\`\``)
-            .setTimestamp();
-          await interaction.editReply({ embeds: [failEmbed] });
-          return;
-        }
-
-        const commits: any[] = await resp.json();
+        const commits = await fetchLatestCommits(10);
 
         if (!commits.length) {
-          const failEmbed = new EmbedBuilder()
-            .setColor(0xED4245)
-            .setTitle("❌ No Commits Found")
-            .setDescription("The repository returned zero commits.")
-            .setTimestamp();
-          await interaction.editReply({ embeds: [failEmbed] });
+          saveUpdateChannelConfig({ channelId: targetChannel.id, lastSha: null });
+          await interaction.editReply({ content: `✅ Automatic commit updates **enabled** in <#${targetChannel.id}>. The repo currently has no commits.` });
           return;
         }
 
-        const embeds = commits.map((c: any) => {
-          const authorName = c.commit?.author?.name || c.commit?.committer?.name || "Unknown";
-          const authorAvatar = c.author?.avatar_url || null;
-          const sha = c.sha.slice(0, 7);
-          const fullMessage = String(c.commit?.message || "");
-          const [firstLine, ...bodyLines] = fullMessage.split("\n");
-          const bodyText = bodyLines.join("\n").replace(/\s+/g, " ").trim();
-          const dateStr = c.commit?.author?.date ? new Date(c.commit.author.date).toLocaleString() : "Unknown";
-
-          return new EmbedBuilder()
-            .setColor(0x57F287)
-            .setAuthor({ name: authorName, iconURL: authorAvatar || undefined })
-            .setTitle(firstLine || "(no commit message)")
-            .setURL(c.html_url || undefined)
-            .setDescription(bodyText.length > 0 ? bodyText.slice(0, 1000) : null)
-            .addFields(
-              { name: "Commit", value: `\`${sha}\``, inline: true },
-              { name: "Date", value: dateStr, inline: true }
-            )
-            .setTimestamp();
-        });
-
-        const target = discord.channels.cache.get(targetChannel.id);
-        if (!target || !("send" in target)) {
-          await interaction.editReply({ content: "❌ Could not access the specified channel." });
-          return;
-        }
-
-        for (let i = 0; i < embeds.length; i += 10) {
-          const batch = embeds.slice(i, i + 10);
-          await (target as any).send({ embeds: batch });
-        }
-        await interaction.editReply({ content: `✅ **${embeds.length}** commit(s) from \`${GITHUB_REPO}\` posted to <#${targetChannel.id}>` });
+        await sendEmbedsToChannel(targetChannel.id, buildCommitEmbeds(commits));
+        saveUpdateChannelConfig({ channelId: targetChannel.id, lastSha: commits[0].sha });
+        await interaction.editReply({ content: `✅ Automatic commit updates **enabled** in <#${targetChannel.id}>. Posted the latest **${commits.length}** commit(s); new commits will be auto-posted every 5 minutes.` });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        const config = loadUpdateChannelConfig();
+        saveUpdateChannelConfig({ channelId: targetChannel.id, lastSha: config.lastSha });
         const failEmbed = new EmbedBuilder()
           .setColor(0xED4245)
           .setTitle("❌ Commit Fetch Failed")
-          .setDescription(`\`\`\`${msg}\`\`\``)
+          .setDescription(`Channel was saved, but fetching commits failed:\n\`\`\`${msg}\`\`\``)
           .setTimestamp();
         try { await interaction.editReply({ embeds: [failEmbed] }); } catch {}
       }
