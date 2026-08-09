@@ -2021,19 +2021,27 @@ discord.on(Events.InteractionCreate, (interaction) => {
           return;
         }
 
-        const fields = commits.map((c: any) => ({
-          name: `\`${c.sha.slice(0, 7)}\``,
-          value: c.commit.message.split("\n")[0],
-          inline: false,
-        }));
+        const embeds = commits.map((c: any) => {
+          const authorName = c.commit?.author?.name || c.commit?.committer?.name || "Unknown";
+          const authorAvatar = c.author?.avatar_url || null;
+          const sha = c.sha.slice(0, 7);
+          const fullMessage = String(c.commit?.message || "");
+          const [firstLine, ...bodyLines] = fullMessage.split("\n");
+          const bodyText = bodyLines.join("\n").replace(/\s+/g, " ").trim();
+          const dateStr = c.commit?.author?.date ? new Date(c.commit.author.date).toLocaleString() : "Unknown";
 
-        const successEmbed = new EmbedBuilder()
-          .setColor(0x57F287)
-          .setTitle("✅ Latest Commits — Update Channel")
-          .setDescription(`Fetched **${commits.length}** commit(s) from \`${GITHUB_REPO}\``)
-          .addFields(fields)
-          .setFooter({ text: `Repo: ${GITHUB_REPO}` })
-          .setTimestamp();
+          return new EmbedBuilder()
+            .setColor(0x57F287)
+            .setAuthor({ name: authorName, iconURL: authorAvatar || undefined })
+            .setTitle(firstLine || "(no commit message)")
+            .setURL(c.html_url || undefined)
+            .setDescription(bodyText.length > 0 ? bodyText.slice(0, 1000) : null)
+            .addFields(
+              { name: "Commit", value: `\`${sha}\``, inline: true },
+              { name: "Date", value: dateStr, inline: true }
+            )
+            .setTimestamp();
+        });
 
         const target = discord.channels.cache.get(targetChannel.id);
         if (!target || !("send" in target)) {
@@ -2041,8 +2049,11 @@ discord.on(Events.InteractionCreate, (interaction) => {
           return;
         }
 
-        await (target as any).send({ embeds: [successEmbed] });
-        await interaction.editReply({ content: `✅ Commit updates posted to <#${targetChannel.id}>` });
+        for (let i = 0; i < embeds.length; i += 10) {
+          const batch = embeds.slice(i, i + 10);
+          await (target as any).send({ embeds: batch });
+        }
+        await interaction.editReply({ content: `✅ **${embeds.length}** commit(s) from \`${GITHUB_REPO}\` posted to <#${targetChannel.id}>` });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const failEmbed = new EmbedBuilder()
