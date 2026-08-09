@@ -1,0 +1,17 @@
+[Unit]
+Description=YOBNH Discord AI Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/yobnh
+EnvironmentFile=/opt/yobnh/.env
+ExecStart=/usr/bin/node /opt/yobnh/dist/index.js --mode=1
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/yobnh/logs.txt
+StandardError=append:/opt/yobnh/logs.txt
+
+[Install]
+WantedBy=multi-user.target

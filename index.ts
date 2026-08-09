@@ -560,10 +560,19 @@ function triggerEmergencyResourceCooldown(): void {
   }, 12000);
 }
 
+function canShowBrowser(): boolean {
+  if (process.platform === "win32" || process.platform === "darwin") return true;
+  return Boolean(process.env.DISPLAY && process.env.DISPLAY.trim() !== "");
+}
+
 async function browseUrl(url: string, keepVisible = false, viewportWidth = 1280, viewportHeight = 720): Promise<BrowserPageResult> {
   let browser: Browser | null = null;
   try {
     debugLog("INFO", "Launching browser for URL", { url, keepVisible });
+    if (keepVisible && !canShowBrowser()) {
+      debugLog("WARN", "No display available, forcing headless", {});
+      keepVisible = false;
+    }
     const launchOptions: any = {
       headless: !keepVisible,
       timeout: 60000,
@@ -1648,11 +1657,19 @@ function restartBot(): void {
   try {
     const launchScript = process.argv[1] || "";
     const isCompiled = /(^|[\\/])dist[\\/]index\.js$/i.test(launchScript);
-    const cmd = isCompiled
-      ? `start "YOBNH" /D "${cwd}" node "${path.join(cwd, "dist", "index.js")}" ${modeArg}`
-      : `start "YOBNH" /D "${cwd}" npx ts-node index.ts ${modeArg}`;
-    spawn("cmd.exe", ["/c", cmd], { detached: true, stdio: "ignore" }).unref();
-    logToFile(`[UPDATE] Restart scheduled (${isCompiled ? "dist" : "ts-node"}): ${cmd}`);
+    if (process.platform !== "win32") {
+      const runCmd = isCompiled
+        ? `cd "${cwd}" && nohup node dist/index.js ${modeArg} >> logs.txt 2>&1 &`
+        : `cd "${cwd}" && nohup npx ts-node index.ts ${modeArg} >> logs.txt 2>&1 &`;
+      spawn("sh", ["-c", runCmd], { detached: true, stdio: "ignore" }).unref();
+      logToFile("[UPDATE] Restart scheduled (linux nohup).");
+    } else {
+      const cmd = isCompiled
+        ? `start "YOBNH" /D "${cwd}" node "${path.join(cwd, "dist", "index.js")}" ${modeArg}`
+        : `start "YOBNH" /D "${cwd}" npx ts-node index.ts ${modeArg}`;
+      spawn("cmd.exe", ["/c", cmd], { detached: true, stdio: "ignore" }).unref();
+      logToFile(`[UPDATE] Restart scheduled (${isCompiled ? "dist" : "ts-node"}): ${cmd}`);
+    }
   } catch (err) {
     logToFile(`[UPDATE] Restart failed: ${err}`);
   }
