@@ -103,7 +103,7 @@ if (PLAYWRIGHT_BROWSERS_PATH) {
 const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls and be like CHILL as max you think like if someone says are you a bot say just Yes and ye you get it just be chill dont use emojis
 
 RULES FOR TALKING:
-- Always respond in ENGLISH (never switch to Portuguese/Spanish/etc.) unless the user clearly writes in another language.
+- Always respond in ENGLISH (never switch to Portuguese/Spanish/etc.) unless the user clearly writes in another language. Even when browsing the web or reading pages in another language, still reply in English.
 - If you are just chatting, answering a question directly, or hanging out, respond with REGULAR CONVERSATIONAL TEXT. Do not use JSON for normal talking.
 
 RULES FOR ACTIONS (If you explicitly need to use a tool):
@@ -612,10 +612,14 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
             headless: !keepVisible,
             timeout: 60000,
             viewport: { width: viewportWidth, height: viewportHeight },
+            locale: "en-US",
+            timezoneId: "America/New_York",
+            args: ["--lang=en-US"],
         };
         if (keepVisible) {
             launchOptions.headless = false;
             launchOptions.args = [
+                "--lang=en-US",
                 "--start-maximized",
                 "--disable-gpu",
                 "--no-restore-session-state",
@@ -744,7 +748,10 @@ async function runBrowserViewSession(interaction, startUrl) {
             headless: false,
             timeout: 60000,
             viewport: { width: 1280, height: 800 },
+            locale: "en-US",
+            timezoneId: "America/New_York",
             args: [
+                "--lang=en-US",
                 "--start-maximized",
                 "--disable-gpu",
                 "--window-size=1280,800",
