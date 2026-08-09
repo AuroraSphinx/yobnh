@@ -16,7 +16,6 @@ const PORT = Number(process.env.ADMIN_PORT ?? 3000);
 const ADMIN_USER = process.env.ADMIN_USER ?? "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS ?? "aurora2026";
 const LOG_FILE = path_1.default.join(__dirname, "bot-errors.log");
-const BOT_SCRIPT = path_1.default.join(__dirname, "index.ts");
 // --- Bot Process Management ---
 let botProcess = null;
 let botRunning = false;

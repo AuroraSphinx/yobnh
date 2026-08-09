@@ -57,6 +57,30 @@ const util_1 = require("util");
 const pidusage_1 = __importDefault(require("pidusage")); // Import pidusage to track system performance loads
 const exec = (0, util_1.promisify)(child_process_1.exec);
 const username = os.userInfo().username;
+// --- Environment Variable Loader (.env support) --------------------------------
+function loadEnvFile() {
+    const envPath = path.join(process.cwd(), '.env');
+    if (!fs.existsSync(envPath))
+        return;
+    const content = fs.readFileSync(envPath, 'utf-8');
+    for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#'))
+            continue;
+        const eqIdx = trimmed.indexOf('=');
+        if (eqIdx === -1)
+            continue;
+        const key = trimmed.slice(0, eqIdx).trim();
+        let val = trimmed.slice(eqIdx + 1).trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1);
+        }
+        if (key && !process.env[key]) {
+            process.env[key] = val;
+        }
+    }
+}
+loadEnvFile();
 // --- Configuration & Initialization ------------------------------------------
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN ?? "";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
@@ -67,6 +91,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const GITHUB_REPO = process.env.GITHUB_REPO ?? "AuroraSphinx/yobnh";
 const PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? null;
 const VERBOSE = process.env.VERBOSE === "true";
+const PREFIX = process.env.PREFIX ?? "!";
 // Variable states configured dynamically on startup
 let RUNNING_MODE = "gpu";
 let MAX_HISTORY = 20;
@@ -75,7 +100,7 @@ let isThrottled = false; // Lock flag to prevent the bot from running tasks duri
 if (PLAYWRIGHT_BROWSERS_PATH) {
     process.env.PLAYWRIGHT_BROWSERS_PATH = PLAYWRIGHT_BROWSERS_PATH;
 }
-const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls
+const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls and be like CHILL as max you think like if someone says are you a bot say just Yes and ye you get it just be chill dont use emojis
 
 RULES FOR TALKING:
 - If you are just chatting, answering a question directly, or hanging out, respond with REGULAR CONVERSATIONAL TEXT. Do not use JSON for normal talking.
@@ -91,6 +116,7 @@ RULES FOR ACTIONS (If you explicitly need to use a tool):
 - untimeout user: {"action":"untimeout","user":"username_or_id","reason":"optional reason"}
 - ban user: {"action":"ban","user":"username_or_id","reason":"optional reason"}
 - unban user: {"action":"unban","user":"username_or_id","reason":"optional reason"}
+- search images: {"action":"search_images","query":"..."}
 - If you need to perform actions, you can send a SINGLE action or an ARRAY of actions to execute them sequentially.
 - Your response must be ONLY valid JSON with NO conversational text around it ONLY when using actions.
 
@@ -104,7 +130,8 @@ IMPORTANT RULES:
 - if someone says yobnh then you must answer because thats shorten of your name
 - If the user asks you to search for information, reply ONLY with JSON.
 - Do not say "I need to search" or "let me look that up" in chat. Do not mention toolcalls or errors.
-- NEVER open google.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-Google websites only.
+- NEVER open duckduckgo.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-DuckDuckGo websites only.
+- If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open, mouse_move, mouse_click, launch, or any other actions when searching for images. Just send the single search_images action and nothing else.
 - Do not mention Detg or say "aw shucks".
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 `;
@@ -154,6 +181,8 @@ function saveBlacklist() {
     }
 }
 function addBlacklist(userId) {
+    if (userId === OWNER_ID)
+        return false;
     if (blacklistedUsers.has(userId))
         return false;
     blacklistedUsers.add(userId);
@@ -168,16 +197,116 @@ function removeBlacklist(userId) {
     return true;
 }
 function isBlacklisted(userId) {
-    return blacklistedUsers.has(userId);
+    if (userId === OWNER_ID)
+        return false;
+    return blacklistedUsers.has(userId) || isTempBlacklisted(userId);
+}
+// --- Temporary Blacklist System (auto-escalating) ---
+const tempBlacklist = new Map();
+const offenseCount = new Map();
+const MAX_BAN_MINUTES = 120;
+function getBanDuration(offenses) {
+    return Math.min(5 * Math.pow(2, offenses - 1), MAX_BAN_MINUTES);
+}
+function addTempBlacklist(userId) {
+    if (userId === OWNER_ID)
+        return { duration: 0, totalOffenses: 0 };
+    const current = offenseCount.get(userId) || 0;
+    offenseCount.set(userId, current + 1);
+    const totalOffenses = current + 1;
+    const durationMin = getBanDuration(totalOffenses);
+    const expiry = Date.now() + durationMin * 60 * 1000;
+    tempBlacklist.set(userId, expiry);
+    logToFile(`[TEMP BAN] User ${userId} banned for ${durationMin}min (offense #${totalOffenses})`);
+    return { duration: durationMin, totalOffenses };
+}
+function isTempBlacklisted(userId) {
+    if (!tempBlacklist.has(userId))
+        return false;
+    const expiry = tempBlacklist.get(userId);
+    if (Date.now() > expiry) {
+        tempBlacklist.delete(userId);
+        return false;
+    }
+    return true;
 }
 const openai = new openai_1.OpenAI({ apiKey: OPENAI_API_KEY || MISTRAL_API_KEY });
 const conversations = new Map();
+let OWNER_ID = "";
+const activeBrowsers = new Set();
+const BROWSER_PROFILE_DIR = path.join(process.cwd(), "browser_profile");
+const BROWSER_PROFILE_NAME = "Yobnh";
+function ensureBrowserProfile() {
+    try {
+        if (!fs.existsSync(BROWSER_PROFILE_DIR)) {
+            fs.mkdirSync(BROWSER_PROFILE_DIR, { recursive: true });
+        }
+        const localStatePath = path.join(BROWSER_PROFILE_DIR, "Local State");
+        let state = {};
+        if (fs.existsSync(localStatePath)) {
+            try {
+                state = JSON.parse(fs.readFileSync(localStatePath, "utf-8"));
+            }
+            catch {
+                state = {};
+            }
+        }
+        if (!state.profile)
+            state.profile = {};
+        if (!state.profile.info_cache)
+            state.profile.info_cache = {};
+        if (!state.profile.info_cache.Default)
+            state.profile.info_cache.Default = {};
+        const cache = state.profile.info_cache.Default;
+        if (cache.name !== BROWSER_PROFILE_NAME) {
+            cache.name = BROWSER_PROFILE_NAME;
+            if (!cache.gaia_name)
+                cache.gaia_name = BROWSER_PROFILE_NAME;
+        }
+        state.profile.last_active_profiles = ["Default"];
+        state.profile.active_profile_level = 1;
+        fs.writeFileSync(localStatePath, JSON.stringify(state, null, 2));
+        const defaultDir = path.join(BROWSER_PROFILE_DIR, "Default");
+        if (!fs.existsSync(defaultDir)) {
+            fs.mkdirSync(defaultDir, { recursive: true });
+        }
+        const preferencesPath = path.join(defaultDir, "Preferences");
+        if (!fs.existsSync(preferencesPath)) {
+            const prefs = { profile: { name: BROWSER_PROFILE_NAME } };
+            fs.writeFileSync(preferencesPath, JSON.stringify(prefs, null, 2));
+        }
+        logToFile(`[BROWSER PROFILE] Persistent profile ready: "${BROWSER_PROFILE_NAME}" at ${BROWSER_PROFILE_DIR}`);
+    }
+    catch (err) {
+        logToFile(`[BROWSER PROFILE] Failed to ensure profile: ${err}`);
+    }
+}
 let verboseEnabled = VERBOSE;
 function debugLog(level, message, meta = null) {
     if (!verboseEnabled)
         return;
     const prefix = `[${new Date().toISOString()}] [${level}]`;
     console.log(prefix, message, meta ? JSON.stringify(meta, null, 2) : "");
+}
+const LOG_FILE = path.join(process.cwd(), "logs.txt");
+let lastLogDate = new Date().toISOString().slice(0, 10);
+function logToFile(message) {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (today !== lastLogDate) {
+        lastLogDate = today;
+        try {
+            fs.writeFileSync(LOG_FILE, "", "utf-8");
+        }
+        catch { }
+    }
+    const timestamp = now.toISOString();
+    const line = `[${timestamp}] ${message}\n`;
+    try {
+        fs.appendFileSync(LOG_FILE, line, "utf-8");
+    }
+    catch { }
+    console.log(line.trim());
 }
 function getHistory(channelId, userId) {
     const key = `${channelId}-${userId}`;
@@ -295,12 +424,14 @@ function splitMessage(text, maxLength = 2000) {
 }
 let terminalInterface = null;
 function createConsoleInterface() {
+    if (!process.stdin.isTTY)
+        return;
     terminalInterface = readline_1.default.createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
     terminalInterface.on("line", (line) => {
         const [command, ...args] = line.trim().split(/\s+/);
         switch ((command || "").toLowerCase()) {
             case "help":
-                console.log("Commands: help, status, history <channelId> <userId>, verbose on|off, blacklist add|remove|list <userId>, ascii, exit");
+                console.log("Commands: help, status, history <channelId> <userId>, verbose on|off, blacklist add|remove|list <userId>, clear <channelId> <userId>, ascii, exit");
                 break;
             case "status":
                 console.log("Discord ready:", discord?.user?.tag || "not logged in");
@@ -327,6 +458,21 @@ function createConsoleInterface() {
                 else {
                     console.log("Usage: verbose on|off");
                 }
+                break;
+            case "clear": {
+                const [channelId, userId] = args;
+                if (!channelId || !userId) {
+                    console.log("Usage: clear <channelId> <userId>");
+                }
+                else {
+                    conversations.delete(`${channelId}-${userId}`);
+                    console.log(`Cleared history for ${channelId}-${userId}`);
+                }
+                break;
+            }
+            case "clearall":
+                conversations.clear();
+                console.log("Cleared all conversation histories.");
                 break;
             case "ascii":
                 printStartupBanner();
@@ -464,7 +610,11 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
     let browser = null;
     try {
         debugLog("INFO", "Launching browser for URL", { url, keepVisible });
-        const launchOptions = { headless: !keepVisible, timeout: 60000 };
+        const launchOptions = {
+            headless: !keepVisible,
+            timeout: 60000,
+            viewport: { width: viewportWidth, height: viewportHeight },
+        };
         if (keepVisible) {
             launchOptions.headless = false;
             launchOptions.args = [
@@ -474,8 +624,10 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
                 "--window-position=0,0",
             ];
         }
-        browser = await playwright_1.chromium.launch(launchOptions);
-        const context = await browser.newContext({ viewport: keepVisible ? { width: viewportWidth, height: viewportHeight } : null });
+        ensureBrowserProfile();
+        const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, launchOptions);
+        browser = context.browser();
+        activeBrowsers.add(browser);
         const page = await context.newPage();
         const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
         debugLog("INFO", "Browser navigated", { status: response?.status(), ok: response?.ok() });
@@ -486,6 +638,7 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
             return document.body.innerText.replace(/\s+/g, " ").trim().slice(0, 3000);
         });
         if (!keepVisible && browser) {
+            activeBrowsers.delete(browser);
             await browser.close();
         }
         if (keepVisible) {
@@ -499,8 +652,10 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
         return { title, url, content };
     }
     catch (error) {
-        if (browser)
+        if (browser) {
+            activeBrowsers.delete(browser);
             await browser.close();
+        }
         try {
             await openWithSystem(url);
             return { title: url, url, content: "Opened in system default browser (fallback)" };
@@ -508,6 +663,271 @@ async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewpor
         catch (e) {
             throw error;
         }
+    }
+}
+async function runBrowserViewSession(interaction, startUrl) {
+    let browser = null;
+    let stopped = false;
+    let currentUrl = startUrl;
+    let status = "Starting...";
+    let activePath = null;
+    const viewDir = path.join(process.cwd(), "browser_views");
+    if (!fs.existsSync(viewDir))
+        fs.mkdirSync(viewDir, { recursive: true });
+    const buildBanner = (url, stat, progressLine = null) => {
+        const urlLine = `📍 URL: ${url.length > 26 ? url.slice(0, 25) + "…" : url}`;
+        const statusLine = `⏱  STATUS: ${stat.length > 22 ? stat.slice(0, 21) + "…" : stat}`;
+        let banner = "```\n" +
+            "+------------------------------------+\n" +
+            "|  🌐  LIVE BROWSER VIEW  🌐         |\n" +
+            "|  ------------------------------    |\n" +
+            `|  ${urlLine.padEnd(36)}|\n` +
+            `|  ${statusLine.padEnd(36)}|\n`;
+        if (progressLine) {
+            banner += `|  ${progressLine.padEnd(36)}|\n`;
+        }
+        banner +=
+            "+------------------------------------+\n" +
+                "```";
+        return banner;
+    };
+    const buildProgressBar = (elapsedMs, totalMs) => {
+        const filled = Math.min(20, Math.floor((elapsedMs / totalMs) * 20));
+        const empty = 20 - filled;
+        const remaining = Math.max(0, Math.ceil((totalMs - elapsedMs) / 1000));
+        return `[${"█".repeat(filled)}${"░".repeat(empty)}] ${remaining}s`;
+    };
+    const takeScreenshot = async () => {
+        if (!page || stopped)
+            return activePath || "";
+        try {
+            const filePath = path.join(viewDir, `view_${Date.now()}_${Math.floor(Math.random() * 9999)}.png`);
+            const buffer = await page.screenshot({ type: "png" });
+            fs.writeFileSync(filePath, buffer);
+            if (activePath) {
+                try {
+                    fs.unlinkSync(activePath);
+                }
+                catch { }
+            }
+            activePath = filePath;
+            return filePath;
+        }
+        catch (err) {
+            logToFile(`[BROWSER VIEW] Screenshot error: ${err}`);
+            return activePath || "";
+        }
+    };
+    const cleanup = async () => {
+        stopped = true;
+        if (browser) {
+            activeBrowsers.delete(browser);
+            try {
+                await browser.close();
+            }
+            catch { }
+            browser = null;
+        }
+    };
+    let page = null;
+    try {
+        ensureBrowserProfile();
+        const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
+            headless: false,
+            timeout: 60000,
+            viewport: { width: 1280, height: 800 },
+            args: [
+                "--start-maximized",
+                "--disable-gpu",
+                "--window-size=1280,800",
+                "--window-position=0,0",
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+            userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            locale: "en-US",
+        });
+        browser = context.browser();
+        activeBrowsers.add(browser);
+        page = await context.newPage();
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, "webdriver", { get: () => false });
+        });
+        logToFile(`[BROWSER VIEW] Navigating to: ${currentUrl}`);
+        try {
+            await page.goto(currentUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+            status = "Live";
+        }
+        catch (navErr) {
+            status = "Nav-failed";
+            logToFile(`[BROWSER VIEW] Initial navigation error: ${navErr}`);
+        }
+        await page.waitForTimeout(2000);
+        const firstShot = await takeScreenshot();
+        const refreshButton = new discord_js_1.ButtonBuilder().setCustomId("bv_refresh").setLabel("🔄 Refresh").setStyle(discord_js_1.ButtonStyle.Primary);
+        const changeUrlButton = new discord_js_1.ButtonBuilder().setCustomId("bv_change").setLabel("🔗 Change URL").setStyle(discord_js_1.ButtonStyle.Secondary);
+        const stopButton = new discord_js_1.ButtonBuilder().setCustomId("bv_stop").setLabel("⏹ Stop").setStyle(discord_js_1.ButtonStyle.Danger);
+        const row = new discord_js_1.ActionRowBuilder().addComponents(refreshButton, changeUrlButton, stopButton);
+        let message = await interaction.editReply({
+            content: buildBanner(currentUrl, status),
+            files: [new discord_js_1.AttachmentBuilder(firstShot, { name: "browser.png" })],
+            components: [row],
+        });
+        const collector = message.createMessageComponentCollector({
+            componentType: discord_js_1.ComponentType.Button,
+            filter: (i) => i.user.id === interaction.user.id,
+            time: 5 * 60 * 1000,
+        });
+        const AUTO_TOTAL_MS = 20_000;
+        const AUTO_INTERVAL_MS = 3_000;
+        const startTime = Date.now();
+        const autoTimer = setInterval(async () => {
+            if (stopped || !page) {
+                clearInterval(autoTimer);
+                return;
+            }
+            const elapsed = Date.now() - startTime;
+            if (elapsed >= AUTO_TOTAL_MS) {
+                clearInterval(autoTimer);
+                status = "Auto-stopped";
+                try {
+                    const finalShot = await takeScreenshot();
+                    await message.edit({
+                        content: buildBanner(currentUrl, status),
+                        files: [new discord_js_1.AttachmentBuilder(finalShot, { name: "browser.png" })],
+                        components: [row],
+                    });
+                }
+                catch { }
+                return;
+            }
+            try {
+                const shot = await takeScreenshot();
+                const progress = buildProgressBar(elapsed, AUTO_TOTAL_MS);
+                await message.edit({
+                    content: buildBanner(currentUrl, `Live (${progress})`, null),
+                    files: [new discord_js_1.AttachmentBuilder(shot, { name: "browser.png" })],
+                    components: [row],
+                });
+            }
+            catch (err) {
+                logToFile(`[BROWSER VIEW] Auto-refresh error: ${err}`);
+            }
+        }, AUTO_INTERVAL_MS);
+        collector.on("collect", async (btnInteraction) => {
+            if (stopped)
+                return;
+            try {
+                await btnInteraction.deferUpdate();
+            }
+            catch { }
+            if (btnInteraction.customId === "bv_refresh") {
+                if (!page)
+                    return;
+                try {
+                    await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => { });
+                    await page.waitForTimeout(1500);
+                    const shot = await takeScreenshot();
+                    status = stopped ? status : "Refreshed";
+                    const progress = Date.now() - startTime < AUTO_TOTAL_MS
+                        ? buildProgressBar(Date.now() - startTime, AUTO_TOTAL_MS)
+                        : null;
+                    await message.edit({
+                        content: buildBanner(currentUrl, status, progress),
+                        files: [new discord_js_1.AttachmentBuilder(shot, { name: "browser.png" })],
+                        components: [row],
+                    });
+                }
+                catch (err) {
+                    logToFile(`[BROWSER VIEW] Refresh error: ${err}`);
+                }
+            }
+            else if (btnInteraction.customId === "bv_change") {
+                try {
+                    await btnInteraction.followUp({
+                        content: "🔗 Send the new URL in your next message in this channel (60s timeout).",
+                        ephemeral: true,
+                    });
+                }
+                catch { }
+                const filter = (m) => m.author.id === interaction.user.id && !m.author.bot;
+                const collected = await btnInteraction.channel?.awaitMessages?.({
+                    filter, max: 1, time: 60_000, errors: ["time"],
+                }).catch(() => null);
+                if (!collected || collected.size === 0)
+                    return;
+                const userMsg = collected.first();
+                const newUrl = sanitizeUrl(userMsg?.content.trim() || "");
+                try {
+                    await userMsg?.delete().catch(() => { });
+                }
+                catch { }
+                if (!newUrl || !page) {
+                    try {
+                        await btnInteraction.followUp({ content: "⚠️ Invalid URL.", ephemeral: true });
+                    }
+                    catch { }
+                    return;
+                }
+                currentUrl = newUrl;
+                status = "Navigating...";
+                try {
+                    await page.goto(newUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+                    await page.waitForTimeout(1500);
+                    const shot = await takeScreenshot();
+                    status = "Navigated";
+                    await message.edit({
+                        content: buildBanner(currentUrl, status),
+                        files: [new discord_js_1.AttachmentBuilder(shot, { name: "browser.png" })],
+                        components: [row],
+                    });
+                }
+                catch (navErr) {
+                    status = "Nav-failed";
+                    logToFile(`[BROWSER VIEW] Navigate error: ${navErr}`);
+                    try {
+                        await message.edit({
+                            content: buildBanner(currentUrl, status),
+                            files: activePath ? [new discord_js_1.AttachmentBuilder(activePath, { name: "browser.png" })] : [],
+                            components: [row],
+                        });
+                    }
+                    catch { }
+                }
+            }
+            else if (btnInteraction.customId === "bv_stop") {
+                clearInterval(autoTimer);
+                await cleanup();
+                try {
+                    await message.edit({
+                        content: buildBanner(currentUrl, "Stopped"),
+                        files: activePath ? [new discord_js_1.AttachmentBuilder(activePath, { name: "browser.png" })] : [],
+                        components: [],
+                    });
+                }
+                catch { }
+                collector.stop();
+            }
+        });
+        collector.on("end", async () => {
+            clearInterval(autoTimer);
+            await cleanup();
+            try {
+                if (activePath)
+                    fs.unlinkSync(activePath);
+            }
+            catch { }
+        });
+    }
+    catch (err) {
+        logToFile(`[BROWSER VIEW] Session error: ${err}`);
+        await cleanup();
+        try {
+            const msg = err instanceof Error ? err.message : String(err);
+            await interaction.editReply(`⚠️ Browser view failed: ${msg}`);
+        }
+        catch { }
     }
 }
 async function openWithSystem(url) {
@@ -536,11 +956,12 @@ async function openWithSystem(url) {
         return;
     }
 }
-async function searchGoogle(query) {
+async function searchDuckDuckGo(query) {
     let browser = null;
     try {
-        debugLog("INFO", "Starting Google search", { query });
-        browser = await playwright_1.chromium.launch({
+        logToFile(`[SEARCH] Starting DuckDuckGo search for: "${query}"`);
+        ensureBrowserProfile();
+        const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
             headless: false,
             timeout: 30000,
             args: [
@@ -548,54 +969,215 @@ async function searchGoogle(query) {
                 "--no-first-run",
                 "--no-default-browser-check",
             ],
-        });
-        const context = await browser.newContext({
             userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             viewport: { width: 1280, height: 800 },
             locale: "en-US",
         });
+        browser = context.browser();
+        activeBrowsers.add(browser);
         const page = await context.newPage();
         await page.addInitScript(() => {
             Object.defineProperty(navigator, "webdriver", { get: () => false });
         });
-        const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+        const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
         const response = await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
-        debugLog("INFO", "Google page loaded", { status: response?.status() });
-        const isCaptcha = await page.evaluate(() => {
-            return document.body.innerText.includes("unusual traffic") ||
-                document.body.innerText.includes("not a robot") ||
-                document.body.innerText.includes("captcha") ||
-                !!document.querySelector("form[action*='sorry']") ||
-                !!document.querySelector("#recaptcha");
-        });
-        if (isCaptcha) {
-            debugLog("WARN", "Google bot verification detected, waiting for manual solve");
-            await page.waitForNavigation({ timeout: 120000 }).catch(() => { });
-        }
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        debugLog("INFO", "DuckDuckGo page loaded", { status: response?.status() });
+        await new Promise(resolve => setTimeout(resolve, 1500));
         const results = await page.evaluate(() => {
             const items = [];
-            const anchors = Array.from(document.querySelectorAll("a h3"));
-            anchors.slice(0, 6).forEach((h3) => {
-                const container = h3.closest("a");
-                if (!container)
-                    return;
-                const element = h3;
-                const title = element.innerText.trim();
-                const snippet = container.parentElement?.querySelector("div")?.innerText.trim().slice(0, 200) || "";
+            const titles = Array.from(document.querySelectorAll("a.result__a"));
+            titles.slice(0, 6).forEach((titleEl) => {
+                const container = titleEl.closest(".result, .result__body, .web-result");
+                const title = titleEl.innerText.trim();
+                const snippetEl = container?.querySelector(".result__snippet");
+                const snippet = (snippetEl?.innerText || "").trim().slice(0, 200);
                 if (title)
                     items.push({ title, snippet });
             });
             return items.slice(0, 5);
         });
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise(resolve => setTimeout(resolve, 1000));
         return results;
     }
     catch (error) {
+        logToFile(`[SEARCH ERROR] ${error}`);
         throw error;
     }
     finally {
         if (browser) {
+            activeBrowsers.delete(browser);
+            await browser.close();
+        }
+    }
+}
+async function searchDuckDuckGoImages(query) {
+    let browser = null;
+    const imagesDir = path.join(process.cwd(), "images_temps");
+    logToFile(`[IMAGE SEARCH] Starting search for: "${query}"`);
+    try {
+        if (!fs.existsSync(imagesDir))
+            fs.mkdirSync(imagesDir, { recursive: true });
+        logToFile(`[IMAGE SEARCH] Launching browser...`);
+        ensureBrowserProfile();
+        const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
+            headless: false,
+            timeout: 60000,
+            args: [
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+            userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            viewport: { width: 1280, height: 800 },
+            locale: "en-US",
+        });
+        browser = context.browser();
+        activeBrowsers.add(browser);
+        const page = await context.newPage();
+        await page.addInitScript(() => {
+            Object.defineProperty(navigator, "webdriver", { get: () => false });
+        });
+        const url = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iar=images&iax=images&ia=images`;
+        logToFile(`[IMAGE SEARCH] Navigating to: ${url}`);
+        await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
+        // Wait for thumbnails to load
+        await page.waitForTimeout(5000);
+        logToFile(`[IMAGE SEARCH] Page loaded, extracting image URLs...`);
+        // Extract actual image URLs from DuckDuckGo results
+        const imageUrls = await page.evaluate(() => {
+            const results = [];
+            const imgs = document.querySelectorAll('img');
+            for (const img of Array.from(imgs)) {
+                const htmlImg = img;
+                const src = htmlImg.src || htmlImg.getAttribute('data-src') || '';
+                if (!src || !src.startsWith('http') || src.includes('data:'))
+                    continue;
+                if (src.includes('/dist/react-assets/'))
+                    continue;
+                if (src.includes('.ico'))
+                    continue;
+                const title = htmlImg.alt || '';
+                if (!results.find(r => r.url === src)) {
+                    results.push({ url: src, title });
+                }
+            }
+            return results.slice(0, 10);
+        });
+        logToFile(`[IMAGE SEARCH] Found ${imageUrls.length} image URLs`);
+        // NSFW filter - blocked domains
+        const nsfwDomains = [
+            'rule34', 'pornhub', 'xvideos', 'xnxx', 'xhamster', 'redtube',
+            'youporn', 'spankbang', 'beeg', 'brazzers', 'realitykings',
+            'bangbros', 'naughtyamerica', 'mofos', 'twistys', 'digitalplayground',
+            'sex.com', 'playvids', 'txxx', 'hclips', 'hdzog', 'vjav',
+            'sxyprn', 'nudostar', 'fapello', 'coomer', 'simpcity',
+            'e621', 'gelbooru', 'danbooru', 'konachan', 'safebooru',
+            'nhentai', 'hanime', 'hentaihaven', 'hentaidude', 'hanime.tv',
+            'pornone', 'eporner', 'drtuber', 'tubegalore', 'ixxx',
+            'porntrex', 'tube8', 'tnaflix', 'sunporno', 'fuq.com',
+            'thumbzilla', 'tnaflix', 'xxxymovies', 'heavy-r', 'youjizz',
+        ];
+        // NSFW keyword patterns in URLs/titles
+        const nsfwKeywords = [
+            'porn', 'xxx', 'sex', 'nude', 'naked', 'nsfw', 'hentai',
+            'rule34', 'boobs', 'tits', 'ass', 'pussy', 'dick', 'cock',
+            'penis', 'vagina', 'orgasm', 'blowjob', 'handjob', 'anal',
+            'milf', 'stepmom', 'stepsister', 'anime', 'nude',
+            'erotic', 'fetish', 'bondage', 'bdsm', 'slut', 'whore',
+            'onlyfans', 'fansly', 'leaked', 'fap', 'masturbat',
+            'creampie', 'gangbang', 'threesome', 'lesbian', 'gay',
+            'tranny', 'shemale', 'lgbtq', // lgbtq sometimes misused for porn
+            'topless', 'topless', 'cleavage', 'lingerie', 'playboy',
+        ];
+        function isNSFW(url, title, query) {
+            const lowerUrl = url.toLowerCase();
+            const lowerTitle = title.toLowerCase();
+            const lowerQuery = query.toLowerCase();
+            // Check for NSFW domains
+            for (const domain of nsfwDomains) {
+                if (lowerUrl.includes(domain)) {
+                    logToFile(`[NSFW FILTER] Blocked domain "${domain}" in: ${url.slice(0, 80)}`);
+                    return true;
+                }
+            }
+            // Check query for explicit keywords
+            for (const keyword of nsfwKeywords) {
+                if (lowerQuery.includes(keyword)) {
+                    logToFile(`[NSFW FILTER] Blocked query keyword "${keyword}" in query: "${query}"`);
+                    return true;
+                }
+            }
+            // Check URL and title for NSFW keywords (but not common safe words)
+            const checkText = `${lowerUrl} ${lowerTitle}`;
+            for (const keyword of nsfwKeywords) {
+                if (checkText.includes(keyword)) {
+                    logToFile(`[NSFW FILTER] Blocked keyword "${keyword}" in URL/title`);
+                    return true;
+                }
+            }
+            // Decode DuckDuckGo proxy URLs to check the original source
+            const uddgMatch = lowerUrl.match(/u=([^&]+)/);
+            if (uddgMatch) {
+                const decoded = decodeURIComponent(uddgMatch[1]).toLowerCase();
+                for (const domain of nsfwDomains) {
+                    if (decoded.includes(domain)) {
+                        logToFile(`[NSFW FILTER] Blocked decoded domain "${domain}"`);
+                        return true;
+                    }
+                }
+                for (const keyword of nsfwKeywords) {
+                    if (decoded.includes(keyword)) {
+                        logToFile(`[NSFW FILTER] Blocked decoded keyword "${keyword}"`);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        // Filter out NSFW images
+        const safeUrls = imageUrls.filter(item => {
+            if (isNSFW(item.url, item.title, query))
+                return false;
+            return true;
+        });
+        logToFile(`[NSFW FILTER] ${imageUrls.length} → ${safeUrls.length} safe images`);
+        // Download images via Playwright's request API (no CORS issues)
+        const downloadedImages = [];
+        for (let i = 0; i < Math.min(safeUrls.length, 4); i++) {
+            const imgUrl = safeUrls[i].url;
+            logToFile(`[IMAGE SEARCH] Downloading image ${i + 1}: ${imgUrl.slice(0, 100)}`);
+            try {
+                const response = await context.request.get(imgUrl, { timeout: 15000 });
+                if (!response.ok()) {
+                    logToFile(`[IMAGE SEARCH] Image ${i + 1} HTTP ${response.status()}`);
+                    continue;
+                }
+                const buffer = await response.body();
+                if (buffer.length < 1000) {
+                    logToFile(`[IMAGE SEARCH] Image ${i + 1} too small (${buffer.length} bytes)`);
+                    continue;
+                }
+                const tempPath = path.join(imagesDir, `search_${Date.now()}_${i}.jpg`);
+                fs.writeFileSync(tempPath, buffer);
+                const sizeKB = Math.round(buffer.length / 1024);
+                logToFile(`[IMAGE SEARCH] Saved image ${i + 1}: ${tempPath} (${sizeKB}KB)`);
+                downloadedImages.push({ imagePath: tempPath, title: safeUrls[i].title || query });
+            }
+            catch (err) {
+                logToFile(`[IMAGE SEARCH] Image ${i + 1} download error: ${err}`);
+            }
+        }
+        logToFile(`[IMAGE SEARCH] Successfully downloaded ${downloadedImages.length} safe images`);
+        return downloadedImages;
+    }
+    catch (error) {
+        logToFile(`[IMAGE SEARCH ERROR] ${error}`);
+        return [];
+    }
+    finally {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        if (browser) {
+            activeBrowsers.delete(browser);
             await browser.close();
         }
     }
@@ -882,6 +1464,69 @@ async function captureGridScreenshot(outputPath) {
     }
     catch { }
 }
+async function handleMaliciousFile(interaction, safeName, threatName, tmpPath) {
+    try {
+        if (fs.existsSync(tmpPath))
+            fs.unlinkSync(tmpPath);
+    }
+    catch { }
+    logToFile(`[FILE BLOCKED] "${safeName}" from ${interaction.user.tag} — ${threatName}`);
+    const banInfo = addTempBlacklist(interaction.user.id);
+    const banDurationStr = banInfo.duration >= 60
+        ? `${banInfo.duration / 60}h`
+        : `${banInfo.duration}min`;
+    if (OWNER_ID) {
+        try {
+            const owner = await discord.users.fetch(OWNER_ID);
+            const source = interaction.guild
+                ? `**Server:** ${interaction.guild.name}\n**Channel:** <#${interaction.channelId}>`
+                : "**Source:** Direct Messages";
+            await owner.send({
+                content: [
+                    `🚫 **Malicious file blocked & user banned!**`,
+                    `**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)`,
+                    `**File:** \`${safeName}\``,
+                    `**Threat:** ${threatName}`,
+                    `**Ban duration:** ${banDurationStr}`,
+                    `**Offense #:** ${banInfo.totalOffenses}`,
+                    source,
+                ].join("\n"),
+            });
+        }
+        catch { }
+    }
+    try {
+        await interaction.editReply({
+            content: `🚫 File blocked — threat detected: **${threatName}**\nYou have been temporarily banned from using this command for **${banDurationStr}**.`
+        });
+    }
+    catch { }
+}
+async function virusScan(filePath) {
+    const progFiles = process.env.ProgramFiles || "C:\\Program Files";
+    const mpCmdRun = path.join(progFiles, "Windows Defender", "MpCmdRun.exe");
+    if (!fs.existsSync(mpCmdRun)) {
+        logToFile("[VIRUS SCAN] Windows Defender not found, skipping scan");
+        return { clean: true };
+    }
+    try {
+        await exec(`"${mpCmdRun}" -Scan -ScanType 3 -File "${filePath}"`, { timeout: 120000 });
+        logToFile(`[VIRUS SCAN] Result for ${path.basename(filePath)}: clean`);
+        return { clean: true };
+    }
+    catch (err) {
+        const exitCode = err.code;
+        if (exitCode !== 2) {
+            logToFile(`[VIRUS SCAN] Scan skipped for ${path.basename(filePath)} (exit ${exitCode}): ${err.message}`);
+            return { clean: true };
+        }
+        const output = (err.stdout || "") + (err.stderr || "");
+        const threatMatch = output.match(/Threat:\s*(.+)/i) || output.match(/Name:\s*(.+)/i);
+        const threat = threatMatch?.[1]?.trim() || "Threat detected";
+        logToFile(`[VIRUS SCAN] Threat found in ${path.basename(filePath)}: ${threat}`);
+        return { clean: false, threat };
+    }
+}
 async function registerSlashCommands(clientId, token) {
     const guildCommands = [
         new discord_js_1.SlashCommandBuilder().setName("grid").setDescription("Screenshot your screen with a grid overlay").toJSON(),
@@ -899,28 +1544,151 @@ async function registerSlashCommands(clientId, token) {
             .addStringOption(option => option.setName("prompt").setDescription("Your question or command for the AI").setRequired(true))
             .toJSON(),
         new discord_js_1.SlashCommandBuilder().setName("yobnh-member").setDescription("Verify a yobnh member").toJSON(),
+        new discord_js_1.SlashCommandBuilder().setName("clearmemory").setDescription("Reset your conversation history with the AI").toJSON(),
         new discord_js_1.SlashCommandBuilder()
             .setName("update-channel")
             .setDescription("Set a channel to receive latest commit updates from the repo")
             .addChannelOption(option => option.setName("channel").setDescription("The channel to post commit updates to").setRequired(true))
             .setDMPermission(false)
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("send-file")
+            .setDescription("Send a file to AuroraSphinx")
+            .addAttachmentOption(option => option.setName("file").setDescription("The file you want to send").setRequired(true))
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("notice-aurora")
+            .setDescription("Send a notice to AuroraSphinx")
+            .addStringOption(option => option.setName("message").setDescription("Your notice message").setRequired(true))
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("see-image-browser")
+            .setDescription("Open a browser and stream live screenshots for 20 seconds with control buttons")
+            .addStringOption(option => option.setName("url").setDescription("The URL to open (defaults to DuckDuckGo)").setRequired(false))
             .toJSON()
     ];
     const rest = new discord_js_1.REST({ version: "10" }).setToken(token);
     try {
         console.log("Synchronizing slash command arrays...");
         await rest.put(discord_js_1.Routes.applicationCommands(clientId), { body: guildCommands });
-        console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel");
+        console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora, /see-image-browser");
     }
     catch (error) {
         console.error("Failed to register slash commands:", error);
     }
 }
+// --- Self-Update System (pulls latest code from GitHub) ---
+async function updateBotFromGitHub(channel, requestedBy) {
+    const send = (text) => channel.send(text).catch(() => { });
+    try {
+        if (!GITHUB_TOKEN) {
+            await send("❌ No `GITHUB_TOKEN` configured. Cannot access the private repository.");
+            return;
+        }
+        const headers = {
+            Authorization: `Bearer ${GITHUB_TOKEN}`,
+            Accept: "application/vnd.github+json",
+            "User-Agent": "yobnh-bot",
+        };
+        await send("🔎 Checking latest commit on GitHub...");
+        const commitResp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=1`, { headers });
+        if (!commitResp.ok) {
+            await send(`❌ GitHub API returned \`${commitResp.status}\`:\n\`\`\`${(await commitResp.text()).slice(0, 500)}\`\`\``);
+            return;
+        }
+        const commits = await commitResp.json();
+        const latest = commits[0];
+        if (!latest) {
+            await send("❌ No commits found in the repository.");
+            return;
+        }
+        const latestSha = latest.sha;
+        const latestMessage = String(latest.commit?.message || "").split("\n")[0];
+        let currentSha = "";
+        try {
+            currentSha = (await exec("git rev-parse HEAD")).stdout.trim();
+        }
+        catch { }
+        if (currentSha && currentSha === latestSha) {
+            await send(`✅ **Already up to date!** Both are on commit \`${latestSha.slice(0, 7)}\``);
+            return;
+        }
+        await send(`🔄 **Updating YOBNH from GitHub**\n` +
+            `\`\`\`\nRepo:    ${GITHUB_REPO}\n` +
+            `Current: ${currentSha ? currentSha.slice(0, 7) : "unknown"}\n` +
+            `Latest:  ${latestSha.slice(0, 7)}\n` +
+            `Commit:  ${latestMessage}\`\`\``);
+        await send("⬇️ Downloading latest source...");
+        const tarResp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/tarball/${latestSha}`, { headers });
+        if (!tarResp.ok) {
+            await send(`❌ Source download failed: \`${tarResp.status}\``);
+            return;
+        }
+        const buffer = Buffer.from(await tarResp.arrayBuffer());
+        const tempDir = path.join(os.tmpdir(), `yobnh_update_${Date.now()}`);
+        fs.mkdirSync(tempDir, { recursive: true });
+        const tarPath = path.join(tempDir, "repo.tar.gz");
+        fs.writeFileSync(tarPath, buffer);
+        await send("📦 Extracting source...");
+        await exec(`tar -xzf "${tarPath}" -C "${tempDir}"`, { maxBuffer: 10 * 1024 * 1024 });
+        const extractRoot = fs.readdirSync(tempDir).find((entry) => entry.startsWith("AuroraSphinx-yobnh-")) || fs.readdirSync(tempDir)[0];
+        const srcDir = path.join(tempDir, extractRoot);
+        if (!fs.existsSync(srcDir) || !fs.statSync(srcDir).isDirectory()) {
+            throw new Error(`Could not find extracted repository folder (got "${extractRoot}")`);
+        }
+        await send("📝 Replacing source files...");
+        const protectedDirs = new Set(["node_modules", ".git", "browser_profile", "images", "images_temps", "community-files"]);
+        const copyTree = (src, dest) => {
+            for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+                if (protectedDirs.has(entry.name))
+                    continue;
+                const srcPath = path.join(src, entry.name);
+                const destPath = path.join(dest, entry.name);
+                if (entry.isDirectory()) {
+                    fs.mkdirSync(destPath, { recursive: true });
+                    copyTree(srcPath, destPath);
+                }
+                else {
+                    fs.copyFileSync(srcPath, destPath);
+                }
+            }
+        };
+        copyTree(srcDir, process.cwd());
+        await send("📦 Installing dependencies (`npm install`)...");
+        await exec("npm install", { cwd: process.cwd(), timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
+        await send("🏗️ Building (`npm run build`)...");
+        await exec("npm run build", { cwd: process.cwd(), timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
+        logToFile(`[UPDATE] Bot updated to ${latestSha.slice(0, 7)} (${latestMessage}) by ${requestedBy}`);
+        await send("✅ **Update complete!** Restarting the bot...");
+        restartBot();
+    }
+    catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logToFile(`[UPDATE ERROR] ${msg}`);
+        try {
+            await send(`❌ **Update failed:**\n\`\`\`${msg}\`\`\``);
+        }
+        catch { }
+    }
+}
+function restartBot() {
+    try {
+        const script = path.join(process.cwd(), "dist", "index.js");
+        const modeArg = `--mode=${RUNNING_MODE}`;
+        const cmd = `start "YOBNH" /D "${process.cwd()}" node "${script}" ${modeArg}`;
+        (0, child_process_1.spawn)("cmd.exe", ["/c", cmd], { detached: true, stdio: "ignore" }).unref();
+        logToFile("[UPDATE] Restart scheduled in a new console window.");
+    }
+    catch (err) {
+        logToFile(`[UPDATE] Restart failed: ${err}`);
+    }
+    setTimeout(() => process.exit(0), 3000).unref();
+}
 discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
     if (!interaction.isChatInputCommand())
         return;
     if (isBlacklisted(interaction.user.id)) {
-        interaction.reply({ content: "Sorry but you are blacklisted from AuroraSphinx.", ephemeral: true });
+        interaction.reply({ content: "Sorry but you are blacklisted from YOBNH.", ephemeral: true });
         return;
     }
     if (interaction.commandName === "grid") {
@@ -956,6 +1724,22 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 }
                 catch { }
             }
+        });
+    }
+    if (interaction.commandName === "see-image-browser") {
+        setImmediate(async () => {
+            try {
+                await interaction.deferReply();
+            }
+            catch (deferError) {
+                if (deferError?.code !== 10062) {
+                    console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
+                    return;
+                }
+            }
+            const rawUrl = interaction.options.getString("url");
+            const startUrl = sanitizeUrl(rawUrl) || "https://html.duckduckgo.com/html/?q=yobnh";
+            await runBrowserViewSession(interaction, startUrl);
         });
     }
     if (interaction.commandName === "send-dm") {
@@ -1089,16 +1873,95 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 }
             }
             try {
-                const askFn = global.askAI;
-                if (!askFn) {
-                    await interaction.editReply("AI system is not initialized yet.");
-                    return;
+                const channelId = interaction.channelId;
+                const userId = interaction.user.id;
+                addToHistory(channelId, userId, "user", prompt);
+                let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 512, 0.5);
+                logToFile(`[ASK AI REPLY] ${reply}`);
+                let parsed = extractJsonFromText(reply);
+                // Handle array of actions (e.g. [{"action":"search_images","query":"..."}])
+                if (Array.isArray(parsed)) {
+                    logToFile(`[ASK PARSED ARRAY] ${JSON.stringify(parsed)}`);
+                    const imageAction = parsed.find((a) => a.action === "search_images");
+                    if (imageAction) {
+                        parsed = imageAction;
+                        logToFile(`[ASK EXTRACTED search_images] ${JSON.stringify(parsed)}`);
+                    }
                 }
-                const reply = await askFn(prompt);
-                const chunks = splitMessage(reply, 2000);
-                await interaction.editReply(chunks[0]);
-                for (let i = 1; i < chunks.length; i++) {
-                    await interaction.followUp(chunks[i]);
+                if (parsed?.action === "search_images" && parsed.query) {
+                    logToFile(`[ASK ACTION] search_images: "${parsed.query}"`);
+                    await interaction.editReply(`🖼️ Searching images for: "${parsed.query}"...\n\n⚠️ **This feature is a work in progress, bugs are expected...**`);
+                    const imageDataArr = await searchDuckDuckGoImages(parsed.query);
+                    logToFile(`[ASK IMAGE RESULT] Got ${imageDataArr.length} images`);
+                    if (imageDataArr.length > 0) {
+                        try {
+                            const attachments = imageDataArr.map(img => new discord_js_1.AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
+                            await interaction.editReply({ content: `🖼️ **${parsed.query}** (${imageDataArr.length} images)`, files: attachments });
+                            for (const img of imageDataArr) {
+                                try {
+                                    fs.unlinkSync(img.imagePath);
+                                }
+                                catch { }
+                            }
+                        }
+                        catch (sendErr) {
+                            logToFile(`[ASK IMAGE SEND ERROR] ${sendErr}`);
+                            await interaction.editReply(`⚠️ Found images but failed to send them.`);
+                        }
+                    }
+                    else {
+                        await interaction.editReply(`⚠️ I couldn't find any images for "${parsed.query}".`);
+                    }
+                    addToHistory(channelId, userId, "assistant", `Searched images for: ${parsed.query}`);
+                }
+                else if (parsed?.action === "search" && parsed.query) {
+                    await interaction.editReply(`🔎 Searching for: "${parsed.query}"...`);
+                    const results = await searchDuckDuckGo(parsed.query);
+                    const browserData = results.length
+                        ? `Search results for "${parsed.query}":\n${results.map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}`).join("\n\n")}`
+                        : `No results found.`;
+                    addToHistory(channelId, userId, "assistant", reply);
+                    addToHistory(channelId, userId, "user", `Browser results:\n${browserData}`);
+                    reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
+                    addToHistory(channelId, userId, "assistant", reply);
+                    const chunks = splitMessage(reply, 2000);
+                    await interaction.editReply(chunks[0]);
+                    for (let i = 1; i < chunks.length; i++) {
+                        await interaction.followUp(chunks[i]);
+                    }
+                }
+                else if (parsed?.action === "open" && parsed.url) {
+                    const cleaned = sanitizeUrl(String(parsed.url));
+                    if (!cleaned) {
+                        await interaction.editReply("⚠️ Invalid URL.");
+                    }
+                    else {
+                        await interaction.editReply(`🌐 Opening: ${cleaned}`);
+                        try {
+                            const page = await browseUrl(cleaned, false, 1280, 720);
+                            addToHistory(channelId, userId, "assistant", reply);
+                            addToHistory(channelId, userId, "user", `Browser results:\nOpened page: ${page.title}\nURL: ${page.url}\n\n${page.content}`);
+                            reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
+                            addToHistory(channelId, userId, "assistant", reply);
+                            const chunks = splitMessage(reply, 2000);
+                            await interaction.editReply(chunks[0]);
+                            for (let i = 1; i < chunks.length; i++) {
+                                await interaction.followUp(chunks[i]);
+                            }
+                        }
+                        catch (err) {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            await interaction.editReply(`⚠️ Failed to open: ${msg}`);
+                        }
+                    }
+                }
+                else {
+                    addToHistory(channelId, userId, "assistant", reply);
+                    const chunks = splitMessage(reply, 2000);
+                    await interaction.editReply(chunks[0]);
+                    for (let i = 1; i < chunks.length; i++) {
+                        await interaction.followUp(chunks[i]);
+                    }
                 }
             }
             catch (err) {
@@ -1113,6 +1976,11 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
     }
     if (interaction.commandName === "yobnh-member") {
         interaction.reply("YOBNH SHOULD BE VERIFIED NOW");
+    }
+    if (interaction.commandName === "clearmemory") {
+        const key = `${interaction.channelId}-${interaction.user.id}`;
+        conversations.delete(key);
+        interaction.reply({ content: "✅ Your conversation history has been cleared.", ephemeral: true });
     }
     if (interaction.commandName === "update-channel") {
         setImmediate(async () => {
@@ -1202,10 +2070,137 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
             }
         });
     }
+    if (interaction.commandName === "send-file") {
+        setImmediate(async () => {
+            try {
+                await interaction.deferReply();
+            }
+            catch {
+                logToFile("[FILE ERROR] Failed to defer reply for send-file");
+                return;
+            }
+            let tmpPath = "";
+            try {
+                const attachment = interaction.options.getAttachment("file", true);
+                const targetDir = path.join(process.cwd(), "community-files", "files-sent");
+                fs.mkdirSync(targetDir, { recursive: true });
+                const originalName = attachment.name;
+                const ext = path.extname(originalName);
+                const baseName = path.basename(originalName, ext);
+                const timestamp = Date.now();
+                const safeName = `${baseName}_${timestamp}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+                tmpPath = path.join(os.tmpdir(), `yobnh_scan_${timestamp}${ext}`);
+                const savePath = path.join(targetDir, safeName);
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 120000);
+                const response = await fetch(attachment.url, { signal: controller.signal });
+                clearTimeout(timeout);
+                if (!response.ok)
+                    throw new Error(`HTTP ${response.status} fetching attachment`);
+                const buffer = Buffer.from(await response.arrayBuffer());
+                fs.writeFileSync(tmpPath, buffer);
+                if (!fs.existsSync(tmpPath)) {
+                    await handleMaliciousFile(interaction, safeName, "Windows Defender real-time protection", tmpPath);
+                    return;
+                }
+                await interaction.editReply({ content: "🔎 Scanning file for threats..." });
+                const scanResult = await virusScan(tmpPath);
+                if (!scanResult.clean) {
+                    await handleMaliciousFile(interaction, safeName, scanResult.threat, tmpPath);
+                    return;
+                }
+                if (!fs.existsSync(tmpPath)) {
+                    await handleMaliciousFile(interaction, safeName, "Windows Defender real-time protection", tmpPath);
+                    return;
+                }
+                fs.copyFileSync(tmpPath, savePath);
+                try {
+                    fs.unlinkSync(tmpPath);
+                }
+                catch { }
+                logToFile(`[FILE] Saved "${safeName}" from ${interaction.user.tag} (${interaction.user.id})`);
+                if (OWNER_ID) {
+                    try {
+                        const owner = await discord.users.fetch(OWNER_ID);
+                        const source = interaction.guild
+                            ? `**Server:** ${interaction.guild.name}\n**Channel:** <#${interaction.channelId}>`
+                            : "**Source:** Direct Messages";
+                        await owner.send({
+                            content: `📁 **File received!**\n**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)\n**File:** \`${safeName}\`\n${source}`
+                        });
+                    }
+                    catch { }
+                }
+                await interaction.editReply({ content: `✅ File saved as \`${safeName}\`` });
+            }
+            catch (err) {
+                logToFile(`[FILE ERROR] Failed to save file from ${interaction.user.tag}: ${err}`);
+                try {
+                    if (fs.existsSync(tmpPath))
+                        fs.unlinkSync(tmpPath);
+                }
+                catch { }
+                try {
+                    await interaction.editReply({ content: "❌ Failed to save the file. Try again later." });
+                }
+                catch { }
+            }
+        });
+    }
+    if (interaction.commandName === "notice-aurora") {
+        setImmediate(async () => {
+            try {
+                await interaction.deferReply({ ephemeral: true });
+            }
+            catch { }
+            const msgContent = interaction.options.getString("message", true);
+            if (!OWNER_ID) {
+                await interaction.editReply({ content: "❌ Bot owner is not configured yet." });
+                return;
+            }
+            try {
+                const owner = await discord.users.fetch(OWNER_ID);
+                const channelName = interaction.channel?.isDMBased()
+                    ? "Direct Messages"
+                    : `#${interaction.channel?.name || "unknown"}`;
+                const guildName = interaction.guild?.name || "Direct Messages";
+                const messageLink = interaction.channel?.isDMBased()
+                    ? `https://discord.com/channels/@me/${interaction.channelId}`
+                    : `https://discord.com/channels/${interaction.guildId}/${interaction.channelId}`;
+                const embed = new discord_js_1.EmbedBuilder()
+                    .setColor(0x5865F2)
+                    .setTitle("Notice from Aurora")
+                    .setDescription(msgContent)
+                    .addFields({ name: "From", value: `${interaction.user.tag} (\`${interaction.user.id}\`)`, inline: true }, { name: "Server", value: guildName, inline: true }, { name: "Channel", value: channelName, inline: true })
+                    .setTimestamp();
+                await owner.send({ content: messageLink, embeds: [embed] });
+                await interaction.editReply({ content: "✅ Your notice has been sent to AuroraSphinx!" });
+            }
+            catch (err) {
+                logToFile(`[NOTICE ERROR] Failed to send notice from ${interaction.user.tag}: ${err}`);
+                await interaction.editReply({ content: "❌ Failed to send the notice. The owner may have DMs disabled." });
+            }
+        });
+    }
 });
 discord.once(discord_js_1.Events.ClientReady, async (client) => {
-    console.log(`? Logged in as ${client.user.tag}`);
-    console.log(`?? Bot ready. Guilds: ${client.guilds.cache.size}`);
+    logToFile(`[BOT] Logged in as ${client.user.tag}`);
+    logToFile(`[BOT] Guilds: ${client.guilds.cache.size}`);
+    try {
+        const app = await client.application.fetch();
+        if (app.owner) {
+            if (app.owner instanceof discord_js_1.Team) {
+                OWNER_ID = app.owner.members.first()?.id ?? "";
+            }
+            else {
+                OWNER_ID = app.owner.id;
+            }
+            logToFile(`[BOT] Owner ID: ${OWNER_ID}`);
+        }
+    }
+    catch (err) {
+        console.error("Failed to fetch bot owner:", err);
+    }
     try {
         await registerSlashCommands(client.user.id, DISCORD_TOKEN);
     }
@@ -1408,12 +2403,35 @@ async function executeSingleAction(parsed, channel, userId, channelId) {
             addToHistory(channelId, userId, "assistant", `Failed to unban user ID ${userQuery}: ${err.message}`);
         }
     }
+    if (parsed?.action === "search_images" && parsed.query) {
+        try {
+            await channel.send(`🖼️ Searching images for: "${parsed.query}"...`);
+            const imageDataArr = await searchDuckDuckGoImages(parsed.query);
+            if (imageDataArr.length > 0) {
+                const attachments = imageDataArr.map(img => new discord_js_1.AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
+                await channel.send({ content: `🖼️ **${imageDataArr[0].title || parsed.query}** (${imageDataArr.length} images)`, files: attachments });
+                for (const img of imageDataArr) {
+                    try {
+                        fs.unlinkSync(img.imagePath);
+                    }
+                    catch { }
+                }
+            }
+            else {
+                await channel.send(`⚠️ I couldn't find any images for "${parsed.query}".`);
+            }
+            addToHistory(channelId, userId, "assistant", `Searched images for: ${parsed.query}`);
+        }
+        catch (err) {
+            await channel.send(`⚠️ Image search failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
 }
 async function handleMessage(message) {
     if (message.author.bot)
         return;
     if (isBlacklisted(message.author.id)) {
-        await message.reply("Sorry but you are blacklisted from AuroraSphinx.");
+        await message.reply("Sorry but you are blacklisted from YOBNH.");
         return;
     }
     if (isThrottled) {
@@ -1421,25 +2439,46 @@ async function handleMessage(message) {
         return;
     }
     const isDM = !message.guild;
-    if (!isDM && (!discord.user || !message.mentions.has(discord.user)))
+    let userText = isDM ? message.content.trim() : message.content.replace(/<@!?(\d+)>/g, "").trim();
+    const hasPrefix = userText.startsWith(PREFIX);
+    if (!isDM && !hasPrefix && (!discord.user || !message.mentions.has(discord.user)))
         return;
     if (isSpamming(message.author.id)) {
         return;
     }
     const channel = message.channel;
-    const userText = isDM ? message.content.trim() : message.content.replace(/<@!?(\d+)>/g, "").trim();
+    let prefixCommand = null;
+    if (hasPrefix) {
+        const rest = userText.slice(PREFIX.length).trim();
+        const parts = rest.split(/\s+/);
+        prefixCommand = (parts.shift() || "").toLowerCase();
+        userText = rest;
+    }
     if (!userText) {
         await message.reply("Hi! What can I do for you today?");
         return;
     }
+    if (prefixCommand === "update") {
+        const isAdmin = message.member?.permissions?.has(discord_js_1.PermissionsBitField.Flags.Administrator);
+        if (message.author.id !== OWNER_ID && !isAdmin) {
+            await message.reply("❌ Only the bot owner or server admins can use `update`.");
+            return;
+        }
+        await channel.send(`🔄 **Yobnh Update** requested by ${message.author.username}...`);
+        await updateBotFromGitHub(channel, message.author.username);
+        return;
+    }
+    logToFile(`[MSG] ${message.author.tag} (${message.author.id}): ${userText}`);
     if (typeof channel.sendTyping === "function")
         await channel.sendTyping();
     const channelId = message.channel.id;
     const userId = message.author.id;
     addToHistory(channelId, userId, "user", userText);
     let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 256, 0.4);
+    logToFile(`[AI REPLY] ${reply}`);
     let parsed = extractJsonFromText(reply);
     if (parsed) {
+        logToFile(`[PARSED ACTION] ${JSON.stringify(parsed)}`);
         addToHistory(channelId, userId, "assistant", reply);
         if (Array.isArray(parsed)) {
             for (const item of parsed) {
@@ -1447,7 +2486,7 @@ async function handleMessage(message) {
             }
             return;
         }
-        else if (parsed.action === "mouse_move" || parsed.action === "mouse_click" || parsed.action === "launch" || parsed.action === "kick" || parsed.action === "timeout" || parsed.action === "untimeout" || parsed.action === "ban" || parsed.action === "unban") {
+        else if (parsed.action === "mouse_move" || parsed.action === "mouse_click" || parsed.action === "launch" || parsed.action === "kick" || parsed.action === "timeout" || parsed.action === "untimeout" || parsed.action === "ban" || parsed.action === "unban" || parsed.action === "search_images") {
             await executeSingleAction(parsed, channel, userId, channelId);
             return;
         }
@@ -1458,16 +2497,46 @@ async function handleMessage(message) {
             await channel.sendTyping();
         try {
             await channel.send(`🔎 Searching for: "${parsed.query}"...`);
-            const results = await searchGoogle(parsed.query);
+            const results = await searchDuckDuckGo(parsed.query);
             browserData = results.length
                 ? `Search results for "${parsed.query}":\n${results
                     .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
                     .join("\n\n")}`
-                : `No Google results found for "${parsed.query}".`;
+                : `No DuckDuckGo results found for "${parsed.query}".`;
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
+        }
+    }
+    else if (parsed?.action === "search_images" && parsed.query) {
+        logToFile(`[ACTION] search_images: "${parsed.query}"`);
+        if (typeof channel.sendTyping === "function")
+            await channel.sendTyping();
+        try {
+            await channel.send(`🖼️ Searching images for: "${parsed.query}"...`);
+            const imageDataArr = await searchDuckDuckGoImages(parsed.query);
+            if (imageDataArr.length > 0) {
+                logToFile(`[IMAGE SUCCESS] Got ${imageDataArr.length} images`);
+                const attachments = imageDataArr.map(img => new discord_js_1.AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
+                await channel.send({ content: `🖼️ **${parsed.query}** (${imageDataArr.length} images)`, files: attachments });
+                // Cleanup temp files after sending
+                for (const img of imageDataArr) {
+                    try {
+                        fs.unlinkSync(img.imagePath);
+                    }
+                    catch { }
+                }
+            }
+            else {
+                logToFile(`[IMAGE FAILED] No images found for "${parsed.query}"`);
+                await channel.send(`⚠️ I couldn't find any images for "${parsed.query}".`);
+            }
+        }
+        catch (err) {
+            logToFile(`[IMAGE ERROR] ${err}`);
+            const msg = err instanceof Error ? err.message : String(err);
+            await channel.send(`⚠️ Image search failed: ${msg}.`);
         }
     }
     else if (parsed?.action === "open" && parsed.url) {
@@ -1476,39 +2545,39 @@ async function handleMessage(message) {
         if (!cleaned) {
             await channel.send("⚠️ The assistant returned an invalid URL to open. Please provide a valid `https://...` URL.");
         }
-        else if (/google\.com\/search/i.test(cleaned)) {
-            let googleQuery = userText;
+        else if (/duckduckgo\.com/i.test(cleaned)) {
+            let ddgQuery = userText;
             try {
-                googleQuery = new URL(cleaned).searchParams.get("q") || userText;
+                ddgQuery = new URL(cleaned).searchParams.get("q") || userText;
             }
             catch { }
             if (typeof channel.sendTyping === "function")
                 await channel.sendTyping();
             try {
-                await channel.send(`🔎 Searching for: "${googleQuery}"...`);
-                const results = await searchGoogle(googleQuery);
+                await channel.send(`🔎 Searching for: "${ddgQuery}"...`);
+                const results = await searchDuckDuckGo(ddgQuery);
                 browserData = results.length
-                    ? `Search results for "${googleQuery}":\n${results
+                    ? `Search results for "${ddgQuery}":\n${results
                         .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
                         .join("\n\n")}`
-                    : `No Google results found for "${googleQuery}".`;
+                    : `No DuckDuckGo results found for "${ddgQuery}".`;
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
             }
         }
-        else if (/^(https?:\/\/)?(www\.)?google\.com\/?$/i.test(cleaned)) {
+        else if (/^(https?:\/\/)?(www\.)?duckduckgo\.com\/?$/i.test(cleaned)) {
             if (typeof channel.sendTyping === "function")
                 await channel.sendTyping();
             try {
                 await channel.send(`🔎 Searching for: "${userText}"...`);
-                const results = await searchGoogle(userText);
+                const results = await searchDuckDuckGo(userText);
                 browserData = results.length
                     ? `Search results for "${userText}":\n${results
                         .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
                         .join("\n\n")}`
-                    : `No Google results found for "${userText}".`;
+                    : `No DuckDuckGo results found for "${userText}".`;
             }
             catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
@@ -1567,6 +2636,7 @@ discord.on(discord_js_1.Events.MessageCreate, async (message) => {
         await handleMessage(message);
     }
     catch (error) {
+        logToFile(`[ERROR] ${error instanceof Error ? error.message : String(error)}\n${error instanceof Error ? error.stack : ""}`);
         const errorPayload = {
             type: "ERROR",
             time: new Date().toLocaleTimeString("en-US", { hour12: false }),
@@ -1583,6 +2653,87 @@ discord.on(discord_js_1.Events.MessageCreate, async (message) => {
 });
 process.on("unhandledRejection", (reason) => { console.error("Unhandled rejection:", reason); });
 process.on("uncaughtException", (error) => { console.error("Uncaught exception:", error); });
+// --- Graceful Shutdown ---
+function setupGracefulShutdown() {
+    const shutdown = async (signal) => {
+        console.log(`\n[SHUTDOWN] Received ${signal}. Cleaning up...`);
+        logToFile(`[SHUTDOWN] Received ${signal}.`);
+        for (const browser of activeBrowsers) {
+            try {
+                await browser.close();
+            }
+            catch { }
+        }
+        activeBrowsers.clear();
+        saveBlacklist();
+        try {
+            terminalInterface?.close();
+        }
+        catch { }
+        try {
+            discord.destroy();
+        }
+        catch { }
+        setTimeout(() => process.exit(0), 3000).unref();
+    };
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+// --- Temp File Cleanup ---
+function startTempCleanup() {
+    const INTERVAL = 30 * 60 * 1000;
+    setInterval(() => {
+        const imageDir = path.join(process.cwd(), 'images_temps');
+        const cutoff = Date.now() - 60 * 60 * 1000;
+        try {
+            if (fs.existsSync(imageDir)) {
+                const files = fs.readdirSync(imageDir);
+                for (const file of files) {
+                    const filePath = path.join(imageDir, file);
+                    try {
+                        const stat = fs.statSync(filePath);
+                        if (stat.isFile() && stat.mtimeMs < cutoff) {
+                            fs.unlinkSync(filePath);
+                            debugLog("CLEANUP", `Removed old temp file: ${file}`);
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
+        try {
+            const tmpFiles = fs.readdirSync(os.tmpdir());
+            for (const file of tmpFiles) {
+                if (!file.startsWith('yobnh_chrome_'))
+                    continue;
+                const filePath = path.join(os.tmpdir(), file);
+                try {
+                    const stat = fs.statSync(filePath);
+                    if (stat.mtimeMs < cutoff) {
+                        fs.rmSync(filePath, { recursive: true, force: true });
+                        debugLog("CLEANUP", `Removed old chrome profile: ${file}`);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+    }, INTERVAL).unref();
+    debugLog("CLEANUP", "Temp file cleanup scheduled every 30 minutes");
+}
+function startTempBlacklistCleanup() {
+    setInterval(() => {
+        const now = Date.now();
+        for (const [userId, expiry] of tempBlacklist) {
+            if (now > expiry) {
+                tempBlacklist.delete(userId);
+                debugLog("TEMP BAN", `Ban expired for user ${userId}`);
+            }
+        }
+    }, 60_000).unref();
+    debugLog("TEMP BAN", "Temp blacklist cleanup scheduled every 60 seconds");
+}
 async function main() {
     const setupRl = readline_1.default.createInterface({ input: process.stdin, output: process.stdout });
     console.log("----------------------------------------");
@@ -1592,9 +2743,14 @@ async function main() {
     console.log("2) ram usage (Low memory footprint, small high-speed models)");
     console.log("----------------------------------------");
     const question = (query) => new Promise((resolve) => setupRl.question(query, resolve));
-    const choice = (await question("Select mode (1 or 2): ")).trim();
+    const modeArg = process.argv.find((arg) => arg.startsWith("--mode="))?.split("=")[1];
+    const envMode = process.env.RUNNING_MODE;
+    let choice = (modeArg || envMode || "").trim();
+    if (!choice) {
+        choice = (await question("Select mode (1 or 2): ")).trim();
+    }
     setupRl.close();
-    if (choice === "2") {
+    if (choice === "2" || choice.toLowerCase() === "ram") {
         RUNNING_MODE = "ram";
         MAX_HISTORY = 6;
         RESPONSE_MODEL = process.env.RESPONSE_MODEL ?? (USE_MISTRAL ? "mistral-small-latest" : "gpt-4o-mini");
@@ -1606,7 +2762,10 @@ async function main() {
     }
     printStartupBanner();
     createConsoleInterface();
+    setupGracefulShutdown();
     startHardwarePerformanceWatchdog();
+    startTempCleanup();
+    startTempBlacklistCleanup();
     loadBlacklist();
     if (!DISCORD_TOKEN) {
         console.error("Critical Error: DISCORD_TOKEN is missing from your environment setup.");
@@ -1617,4 +2776,24 @@ async function main() {
         process.exit(1);
     });
 }
-main();
+async function runWithRetry() {
+    const MAX_RETRIES = 10;
+    const RETRY_DELAY = 5000;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            await main();
+            break;
+        }
+        catch (err) {
+            console.error(`\n[FATAL] Bot crashed (attempt ${attempt}/${MAX_RETRIES}). Restarting in ${RETRY_DELAY / 1000}s...`);
+            console.error(err);
+            logToFile(`[FATAL] Bot crashed (attempt ${attempt}): ${err instanceof Error ? err.message : String(err)}`);
+            if (attempt >= MAX_RETRIES) {
+                console.error("[FATAL] Max retries reached. Giving up.");
+                process.exit(1);
+            }
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+        }
+    }
+}
+runWithRetry();

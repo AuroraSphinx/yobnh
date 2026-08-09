@@ -12,9 +12,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import readline from "readline";
-import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, EmbedBuilder, Team } from "discord.js";
+import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, EmbedBuilder, Team, ButtonBuilder, ButtonStyle, ActionRowBuilder, ComponentType, ChatInputCommandInteraction } from "discord.js";
 import { OpenAI } from "openai";
-import { chromium, Browser } from "playwright";
+import { chromium, Browser, Page } from "playwright";
 import { exec as execCb, spawn, execFile } from "child_process";
 import { promisify } from "util";
 import pidusage from "pidusage"; // Import pidusage to track system performance loads
@@ -54,6 +54,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const GITHUB_REPO = process.env.GITHUB_REPO ?? "AuroraSphinx/yobnh";
 const PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? null;
 const VERBOSE = process.env.VERBOSE === "true";
+const PREFIX = process.env.PREFIX ?? "!";
 
 // Variable states configured dynamically on startup
 let RUNNING_MODE: "gpu" | "ram" = "gpu";
@@ -65,7 +66,7 @@ if (PLAYWRIGHT_BROWSERS_PATH) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = PLAYWRIGHT_BROWSERS_PATH;
 }
 
-const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls
+const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls and be like CHILL as max you think like if someone says are you a bot say just Yes and ye you get it just be chill dont use emojis
 
 RULES FOR TALKING:
 - If you are just chatting, answering a question directly, or hanging out, respond with REGULAR CONVERSATIONAL TEXT. Do not use JSON for normal talking.
@@ -95,7 +96,7 @@ IMPORTANT RULES:
 - if someone says yobnh then you must answer because thats shorten of your name
 - If the user asks you to search for information, reply ONLY with JSON.
 - Do not say "I need to search" or "let me look that up" in chat. Do not mention toolcalls or errors.
-- NEVER open google.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-Google websites only.
+- NEVER open duckduckgo.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-DuckDuckGo websites only.
 - If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open, mouse_move, mouse_click, launch, or any other actions when searching for images. Just send the single search_images action and nothing else.
 - Do not mention Detg or say "aw shucks".
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
@@ -206,6 +207,49 @@ const openai = new OpenAI({ apiKey: OPENAI_API_KEY || MISTRAL_API_KEY });
 const conversations = new Map<string, ChatMessage[]>();
 let OWNER_ID = "";
 const activeBrowsers = new Set<Browser>();
+const BROWSER_PROFILE_DIR = path.join(process.cwd(), "browser_profile");
+const BROWSER_PROFILE_NAME = "Yobnh";
+
+function ensureBrowserProfile(): void {
+  try {
+    if (!fs.existsSync(BROWSER_PROFILE_DIR)) {
+      fs.mkdirSync(BROWSER_PROFILE_DIR, { recursive: true });
+    }
+    const localStatePath = path.join(BROWSER_PROFILE_DIR, "Local State");
+    let state: any = {};
+    if (fs.existsSync(localStatePath)) {
+      try {
+        state = JSON.parse(fs.readFileSync(localStatePath, "utf-8"));
+      } catch {
+        state = {};
+      }
+    }
+    if (!state.profile) state.profile = {};
+    if (!state.profile.info_cache) state.profile.info_cache = {};
+    if (!state.profile.info_cache.Default) state.profile.info_cache.Default = {};
+    const cache = state.profile.info_cache.Default;
+    if (cache.name !== BROWSER_PROFILE_NAME) {
+      cache.name = BROWSER_PROFILE_NAME;
+      if (!cache.gaia_name) cache.gaia_name = BROWSER_PROFILE_NAME;
+    }
+    state.profile.last_active_profiles = ["Default"];
+    state.profile.active_profile_level = 1;
+    fs.writeFileSync(localStatePath, JSON.stringify(state, null, 2));
+
+    const defaultDir = path.join(BROWSER_PROFILE_DIR, "Default");
+    if (!fs.existsSync(defaultDir)) {
+      fs.mkdirSync(defaultDir, { recursive: true });
+    }
+    const preferencesPath = path.join(defaultDir, "Preferences");
+    if (!fs.existsSync(preferencesPath)) {
+      const prefs: any = { profile: { name: BROWSER_PROFILE_NAME } };
+      fs.writeFileSync(preferencesPath, JSON.stringify(prefs, null, 2));
+    }
+    logToFile(`[BROWSER PROFILE] Persistent profile ready: "${BROWSER_PROFILE_NAME}" at ${BROWSER_PROFILE_DIR}`);
+  } catch (err) {
+    logToFile(`[BROWSER PROFILE] Failed to ensure profile: ${err}`);
+  }
+}
 let verboseEnabled = VERBOSE;
 
 function debugLog(level: string, message: string, meta: Record<string, unknown> | null = null): void {
@@ -351,6 +395,7 @@ function splitMessage(text: string, maxLength = 2000): string[] {
 let terminalInterface: readline.Interface | null = null;
 
 function createConsoleInterface(): void {
+  if (!process.stdin.isTTY) return;
   terminalInterface = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
 
   terminalInterface.on("line", (line) => {
@@ -521,7 +566,11 @@ async function browseUrl(url: string, keepVisible = false, viewportWidth = 1280,
   let browser: Browser | null = null;
   try {
     debugLog("INFO", "Launching browser for URL", { url, keepVisible });
-    const launchOptions: any = { headless: !keepVisible, timeout: 60000 };
+    const launchOptions: any = {
+      headless: !keepVisible,
+      timeout: 60000,
+      viewport: { width: viewportWidth, height: viewportHeight },
+    };
     if (keepVisible) {
       launchOptions.headless = false;
       launchOptions.args = [
@@ -531,10 +580,11 @@ async function browseUrl(url: string, keepVisible = false, viewportWidth = 1280,
         "--window-position=0,0",
       ];
     }
-    
-    browser = await chromium.launch(launchOptions);
+
+    ensureBrowserProfile();
+    const context = await chromium.launchPersistentContext(BROWSER_PROFILE_DIR, launchOptions);
+    browser = context.browser()!;
     activeBrowsers.add(browser);
-    const context = await browser.newContext({ viewport: keepVisible ? { width: viewportWidth, height: viewportHeight } : null });
     const page = await context.newPage();
     const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
     debugLog("INFO", "Browser navigated", { status: response?.status(), ok: response?.ok() });
@@ -571,6 +621,253 @@ async function browseUrl(url: string, keepVisible = false, viewportWidth = 1280,
   }
 }
 
+async function runBrowserViewSession(interaction: ChatInputCommandInteraction, startUrl: string): Promise<void> {
+  let browser: Browser | null = null;
+  let stopped = false;
+  let currentUrl = startUrl;
+  let status = "Starting...";
+  let activePath: string | null = null;
+
+  const viewDir = path.join(process.cwd(), "browser_views");
+  if (!fs.existsSync(viewDir)) fs.mkdirSync(viewDir, { recursive: true });
+
+  const buildBanner = (url: string, stat: string, progressLine: string | null = null): string => {
+    const urlLine = `📍 URL: ${url.length > 26 ? url.slice(0, 25) + "…" : url}`;
+    const statusLine = `⏱  STATUS: ${stat.length > 22 ? stat.slice(0, 21) + "…" : stat}`;
+    let banner =
+      "```\n" +
+      "+------------------------------------+\n" +
+      "|  🌐  LIVE BROWSER VIEW  🌐         |\n" +
+      "|  ------------------------------    |\n" +
+      `|  ${urlLine.padEnd(36)}|\n` +
+      `|  ${statusLine.padEnd(36)}|\n`;
+    if (progressLine) {
+      banner += `|  ${progressLine.padEnd(36)}|\n`;
+    }
+    banner +=
+      "+------------------------------------+\n" +
+      "```";
+    return banner;
+  };
+
+  const buildProgressBar = (elapsedMs: number, totalMs: number): string => {
+    const filled = Math.min(20, Math.floor((elapsedMs / totalMs) * 20));
+    const empty = 20 - filled;
+    const remaining = Math.max(0, Math.ceil((totalMs - elapsedMs) / 1000));
+    return `[${"█".repeat(filled)}${"░".repeat(empty)}] ${remaining}s`;
+  };
+
+  const takeScreenshot = async (): Promise<string> => {
+    if (!page || stopped) return activePath || "";
+    try {
+      const filePath = path.join(viewDir, `view_${Date.now()}_${Math.floor(Math.random() * 9999)}.png`);
+      const buffer = await page.screenshot({ type: "png" });
+      fs.writeFileSync(filePath, buffer);
+      if (activePath) {
+        try { fs.unlinkSync(activePath); } catch {}
+      }
+      activePath = filePath;
+      return filePath;
+    } catch (err) {
+      logToFile(`[BROWSER VIEW] Screenshot error: ${err}`);
+      return activePath || "";
+    }
+  };
+
+  const cleanup = async () => {
+    stopped = true;
+    if (browser) {
+      activeBrowsers.delete(browser);
+      try { await browser.close(); } catch {}
+      browser = null;
+    }
+  };
+
+  let page: Page | null = null;
+
+  try {
+    ensureBrowserProfile();
+    const context = await chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
+      headless: false,
+      timeout: 60000,
+      viewport: { width: 1280, height: 800 },
+      args: [
+        "--start-maximized",
+        "--disable-gpu",
+        "--window-size=1280,800",
+        "--window-position=0,0",
+        "--disable-blink-features=AutomationControlled",
+        "--no-first-run",
+        "--no-default-browser-check",
+      ],
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      locale: "en-US",
+    });
+    browser = context.browser()!;
+    activeBrowsers.add(browser);
+    page = await context.newPage();
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => false });
+    });
+
+    logToFile(`[BROWSER VIEW] Navigating to: ${currentUrl}`);
+    try {
+      await page.goto(currentUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      status = "Live";
+    } catch (navErr) {
+      status = "Nav-failed";
+      logToFile(`[BROWSER VIEW] Initial navigation error: ${navErr}`);
+    }
+
+    await page.waitForTimeout(2000);
+    const firstShot = await takeScreenshot();
+
+    const refreshButton = new ButtonBuilder().setCustomId("bv_refresh").setLabel("🔄 Refresh").setStyle(ButtonStyle.Primary);
+    const changeUrlButton = new ButtonBuilder().setCustomId("bv_change").setLabel("🔗 Change URL").setStyle(ButtonStyle.Secondary);
+    const stopButton = new ButtonBuilder().setCustomId("bv_stop").setLabel("⏹ Stop").setStyle(ButtonStyle.Danger);
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(refreshButton, changeUrlButton, stopButton);
+
+    let message = await interaction.editReply({
+      content: buildBanner(currentUrl, status),
+      files: [new AttachmentBuilder(firstShot, { name: "browser.png" })],
+      components: [row],
+    });
+
+    const collector = message.createMessageComponentCollector({
+      componentType: ComponentType.Button,
+      filter: (i) => i.user.id === interaction.user.id,
+      time: 5 * 60 * 1000,
+    });
+
+    const AUTO_TOTAL_MS = 20_000;
+    const AUTO_INTERVAL_MS = 3_000;
+    const startTime = Date.now();
+
+    const autoTimer = setInterval(async () => {
+      if (stopped || !page) {
+        clearInterval(autoTimer);
+        return;
+      }
+      const elapsed = Date.now() - startTime;
+      if (elapsed >= AUTO_TOTAL_MS) {
+        clearInterval(autoTimer);
+        status = "Auto-stopped";
+        try {
+          const finalShot = await takeScreenshot();
+          await message.edit({
+            content: buildBanner(currentUrl, status),
+            files: [new AttachmentBuilder(finalShot, { name: "browser.png" })],
+            components: [row],
+          });
+        } catch {}
+        return;
+      }
+      try {
+        const shot = await takeScreenshot();
+        const progress = buildProgressBar(elapsed, AUTO_TOTAL_MS);
+        await message.edit({
+          content: buildBanner(currentUrl, `Live (${progress})`, null),
+          files: [new AttachmentBuilder(shot, { name: "browser.png" })],
+          components: [row],
+        });
+      } catch (err) {
+        logToFile(`[BROWSER VIEW] Auto-refresh error: ${err}`);
+      }
+    }, AUTO_INTERVAL_MS);
+
+    collector.on("collect", async (btnInteraction) => {
+      if (stopped) return;
+      try { await btnInteraction.deferUpdate(); } catch {}
+
+      if (btnInteraction.customId === "bv_refresh") {
+        if (!page) return;
+        try {
+          await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => {});
+          await page.waitForTimeout(1500);
+          const shot = await takeScreenshot();
+          status = stopped ? status : "Refreshed";
+          const progress = Date.now() - startTime < AUTO_TOTAL_MS
+            ? buildProgressBar(Date.now() - startTime, AUTO_TOTAL_MS)
+            : null;
+          await message.edit({
+            content: buildBanner(currentUrl, status, progress),
+            files: [new AttachmentBuilder(shot, { name: "browser.png" })],
+            components: [row],
+          });
+        } catch (err) {
+          logToFile(`[BROWSER VIEW] Refresh error: ${err}`);
+        }
+      } else if (btnInteraction.customId === "bv_change") {
+        try {
+          await btnInteraction.followUp({
+            content: "🔗 Send the new URL in your next message in this channel (60s timeout).",
+            ephemeral: true,
+          });
+        } catch {}
+        const filter = (m: Message) => m.author.id === interaction.user.id && !m.author.bot;
+        const collected = await (btnInteraction.channel as any)?.awaitMessages?.({
+          filter, max: 1, time: 60_000, errors: ["time"],
+        }).catch(() => null);
+        if (!collected || collected.size === 0) return;
+        const userMsg = collected.first();
+        const newUrl = sanitizeUrl(userMsg?.content.trim() || "");
+        try { await userMsg?.delete().catch(() => {}); } catch {}
+        if (!newUrl || !page) {
+          try { await btnInteraction.followUp({ content: "⚠️ Invalid URL.", ephemeral: true }); } catch {}
+          return;
+        }
+        currentUrl = newUrl;
+        status = "Navigating...";
+        try {
+          await page.goto(newUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+          await page.waitForTimeout(1500);
+          const shot = await takeScreenshot();
+          status = "Navigated";
+          await message.edit({
+            content: buildBanner(currentUrl, status),
+            files: [new AttachmentBuilder(shot, { name: "browser.png" })],
+            components: [row],
+          });
+        } catch (navErr) {
+          status = "Nav-failed";
+          logToFile(`[BROWSER VIEW] Navigate error: ${navErr}`);
+          try {
+            await message.edit({
+              content: buildBanner(currentUrl, status),
+              files: activePath ? [new AttachmentBuilder(activePath, { name: "browser.png" })] : [],
+              components: [row],
+            });
+          } catch {}
+        }
+      } else if (btnInteraction.customId === "bv_stop") {
+        clearInterval(autoTimer);
+        await cleanup();
+        try {
+          await message.edit({
+            content: buildBanner(currentUrl, "Stopped"),
+            files: activePath ? [new AttachmentBuilder(activePath, { name: "browser.png" })] : [],
+            components: [],
+          });
+        } catch {}
+        collector.stop();
+      }
+    });
+
+    collector.on("end", async () => {
+      clearInterval(autoTimer);
+      await cleanup();
+      try { if (activePath) fs.unlinkSync(activePath); } catch {}
+    });
+  } catch (err) {
+    logToFile(`[BROWSER VIEW] Session error: ${err}`);
+    await cleanup();
+    try {
+      const msg = err instanceof Error ? err.message : String(err);
+      await interaction.editReply(`⚠️ Browser view failed: ${msg}`);
+    } catch {}
+  }
+}
+
 async function openWithSystem(url: string): Promise<void> {
   const safeUrl = String(url).replace(/"/g, '"');
   if (process.platform === "win32") {
@@ -594,12 +891,12 @@ async function openWithSystem(url: string): Promise<void> {
   }
 }
 
-async function searchGoogle(query: string): Promise<SearchResult[]> {
+async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
   let browser: Browser | null = null;
-  const tempProfile = path.join(os.tmpdir(), `yobnh_chrome_${Date.now()}`);
   try {
-    logToFile(`[SEARCH] Starting Google search for: "${query}"`);
-    const context = await chromium.launchPersistentContext(tempProfile, {
+    logToFile(`[SEARCH] Starting DuckDuckGo search for: "${query}"`);
+    ensureBrowserProfile();
+    const context = await chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
       headless: false,
       timeout: 30000,
       args: [
@@ -619,40 +916,26 @@ async function searchGoogle(query: string): Promise<SearchResult[]> {
       Object.defineProperty(navigator, "webdriver", { get: () => false });
     });
 
-    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
     const response = await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
-    debugLog("INFO", "Google page loaded", { status: response?.status() });
+    debugLog("INFO", "DuckDuckGo page loaded", { status: response?.status() });
 
-    const isCaptcha = await page.evaluate(() => {
-      return document.body.innerText.includes("unusual traffic") ||
-             document.body.innerText.includes("not a robot") ||
-             document.body.innerText.includes("captcha") ||
-             !!document.querySelector("form[action*='sorry']") ||
-             !!document.querySelector("#recaptcha");
-    });
-
-    if (isCaptcha) {
-      debugLog("WARN", "Google bot verification detected, waiting for manual solve");
-      await page.waitForNavigation({ timeout: 120000 }).catch(() => {});
-    }
-
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 1500));
 
     const results = await page.evaluate(() => {
       const items: Array<{ title: string; snippet: string }> = [];
-      const anchors = Array.from(document.querySelectorAll("a h3"));
-      anchors.slice(0, 6).forEach((h3) => {
-        const container = h3.closest("a");
-        if (!container) return;
-        const element = h3 as HTMLElement;
-        const title = element.innerText.trim();
-        const snippet = container.parentElement?.querySelector("div")?.innerText.trim().slice(0, 200) || "";
+      const titles = Array.from(document.querySelectorAll("a.result__a"));
+      titles.slice(0, 6).forEach((titleEl) => {
+        const container = titleEl.closest(".result, .result__body, .web-result") as HTMLElement | null;
+        const title = (titleEl as HTMLElement).innerText.trim();
+        const snippetEl = container?.querySelector(".result__snippet") as HTMLElement | null;
+        const snippet = (snippetEl?.innerText || "").trim().slice(0, 200);
         if (title) items.push({ title, snippet });
       });
       return items.slice(0, 5);
     });
 
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    await new Promise(resolve => setTimeout(resolve, 1000));
 
     return results;
   } catch (error) {
@@ -663,20 +946,19 @@ async function searchGoogle(query: string): Promise<SearchResult[]> {
       activeBrowsers.delete(browser);
       await browser.close();
     }
-    try { fs.rmSync(tempProfile, { recursive: true, force: true }); } catch {}
   }
 }
 
-async function searchGoogleImages(query: string): Promise<Array<{ imagePath: string; title: string }>> {
+async function searchDuckDuckGoImages(query: string): Promise<Array<{ imagePath: string; title: string }>> {
   let browser: Browser | null = null;
-  const tempProfile = path.join(os.tmpdir(), `yobnh_chrome_img_${Date.now()}`);
   const imagesDir = path.join(process.cwd(), "images_temps");
   logToFile(`[IMAGE SEARCH] Starting search for: "${query}"`);
   try {
     if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
 
     logToFile(`[IMAGE SEARCH] Launching browser...`);
-    const context = await chromium.launchPersistentContext(tempProfile, {
+    ensureBrowserProfile();
+    const context = await chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
       headless: false,
       timeout: 60000,
       args: [
@@ -852,7 +1134,6 @@ async function searchGoogleImages(query: string): Promise<Array<{ imagePath: str
       activeBrowsers.delete(browser);
       await browser.close();
     }
-    try { fs.rmSync(tempProfile, { recursive: true, force: true }); } catch {}
   }
 }
 
@@ -1254,6 +1535,13 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
       .addStringOption(option =>
         option.setName("message").setDescription("Your notice message").setRequired(true)
       )
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("see-image-browser")
+      .setDescription("Open a browser and stream live screenshots for 20 seconds with control buttons")
+      .addStringOption(option =>
+        option.setName("url").setDescription("The URL to open (defaults to DuckDuckGo)").setRequired(false)
+      )
       .toJSON()
   ];
 
@@ -1262,10 +1550,125 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
   try {
     console.log("Synchronizing slash command arrays...");
     await rest.put(Routes.applicationCommands(clientId), { body: guildCommands });
-    console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora");
+    console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora, /see-image-browser");
   } catch (error) {
     console.error("Failed to register slash commands:", error);
   }
+}
+
+// --- Self-Update System (pulls latest code from GitHub) ---
+async function updateBotFromGitHub(channel: any, requestedBy: string): Promise<void> {
+  const send = (text: string) => channel.send(text).catch(() => {});
+
+  try {
+    if (!GITHUB_TOKEN) {
+      await send("❌ No `GITHUB_TOKEN` configured. Cannot access the private repository.");
+      return;
+    }
+
+    const headers = {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "User-Agent": "yobnh-bot",
+    };
+
+    await send("🔎 Checking latest commit on GitHub...");
+    const commitResp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=1`, { headers });
+    if (!commitResp.ok) {
+      await send(`❌ GitHub API returned \`${commitResp.status}\`:\n\`\`\`${(await commitResp.text()).slice(0, 500)}\`\`\``);
+      return;
+    }
+    const commits: any[] = await commitResp.json();
+    const latest = commits[0];
+    if (!latest) {
+      await send("❌ No commits found in the repository.");
+      return;
+    }
+    const latestSha = latest.sha;
+    const latestMessage = String(latest.commit?.message || "").split("\n")[0];
+
+    let currentSha = "";
+    try { currentSha = (await exec("git rev-parse HEAD")).stdout.trim(); } catch {}
+
+    if (currentSha && currentSha === latestSha) {
+      await send(`✅ **Already up to date!** Both are on commit \`${latestSha.slice(0, 7)}\``);
+      return;
+    }
+
+    await send(
+      `🔄 **Updating YOBNH from GitHub**\n` +
+      `\`\`\`\nRepo:    ${GITHUB_REPO}\n` +
+      `Current: ${currentSha ? currentSha.slice(0, 7) : "unknown"}\n` +
+      `Latest:  ${latestSha.slice(0, 7)}\n` +
+      `Commit:  ${latestMessage}\`\`\``
+    );
+
+    await send("⬇️ Downloading latest source...");
+    const tarResp = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/tarball/${latestSha}`, { headers });
+    if (!tarResp.ok) {
+      await send(`❌ Source download failed: \`${tarResp.status}\``);
+      return;
+    }
+    const buffer = Buffer.from(await tarResp.arrayBuffer());
+
+    const tempDir = path.join(os.tmpdir(), `yobnh_update_${Date.now()}`);
+    fs.mkdirSync(tempDir, { recursive: true });
+    const tarPath = path.join(tempDir, "repo.tar.gz");
+    fs.writeFileSync(tarPath, buffer);
+
+    await send("📦 Extracting source...");
+    await exec(`tar -xzf "${tarPath}" -C "${tempDir}"`, { maxBuffer: 10 * 1024 * 1024 });
+
+    const extractRoot = fs.readdirSync(tempDir).find((entry) => entry.startsWith("AuroraSphinx-yobnh-")) || fs.readdirSync(tempDir)[0];
+    const srcDir = path.join(tempDir, extractRoot);
+    if (!fs.existsSync(srcDir) || !fs.statSync(srcDir).isDirectory()) {
+      throw new Error(`Could not find extracted repository folder (got "${extractRoot}")`);
+    }
+
+    await send("📝 Replacing source files...");
+    const protectedDirs = new Set(["node_modules", ".git", "browser_profile", "images", "images_temps", "community-files"]);
+    const copyTree = (src: string, dest: string): void => {
+      for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        if (protectedDirs.has(entry.name)) continue;
+        const srcPath = path.join(src, entry.name);
+        const destPath = path.join(dest, entry.name);
+        if (entry.isDirectory()) {
+          fs.mkdirSync(destPath, { recursive: true });
+          copyTree(srcPath, destPath);
+        } else {
+          fs.copyFileSync(srcPath, destPath);
+        }
+      }
+    };
+    copyTree(srcDir, process.cwd());
+
+    await send("📦 Installing dependencies (`npm install`)...");
+    await exec("npm install", { cwd: process.cwd(), timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
+
+    await send("🏗️ Building (`npm run build`)...");
+    await exec("npm run build", { cwd: process.cwd(), timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
+
+    logToFile(`[UPDATE] Bot updated to ${latestSha.slice(0, 7)} (${latestMessage}) by ${requestedBy}`);
+    await send("✅ **Update complete!** Restarting the bot...");
+    restartBot();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logToFile(`[UPDATE ERROR] ${msg}`);
+    try { await send(`❌ **Update failed:**\n\`\`\`${msg}\`\`\``); } catch {}
+  }
+}
+
+function restartBot(): void {
+  try {
+    const script = path.join(process.cwd(), "dist", "index.js");
+    const modeArg = `--mode=${RUNNING_MODE}`;
+    const cmd = `start "YOBNH" /D "${process.cwd()}" node "${script}" ${modeArg}`;
+    spawn("cmd.exe", ["/c", cmd], { detached: true, stdio: "ignore" }).unref();
+    logToFile("[UPDATE] Restart scheduled in a new console window.");
+  } catch (err) {
+    logToFile(`[UPDATE] Restart failed: ${err}`);
+  }
+  setTimeout(() => process.exit(0), 3000).unref();
 }
 
 discord.on(Events.InteractionCreate, (interaction) => {
@@ -1301,6 +1704,23 @@ discord.on(Events.InteractionCreate, (interaction) => {
         console.error("Grid screenshot collection or upload failed:", err);
         try { await interaction.editReply(`Screenshot failed: ${msg}`); } catch {}
       }
+    });
+  }
+
+  if (interaction.commandName === "see-image-browser") {
+    setImmediate(async () => {
+      try {
+        await interaction.deferReply();
+      } catch (deferError: any) {
+        if (deferError?.code !== 10062) {
+          console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
+          return;
+        }
+      }
+
+      const rawUrl = interaction.options.getString("url");
+      const startUrl = sanitizeUrl(rawUrl) || "https://html.duckduckgo.com/html/?q=yobnh";
+      await runBrowserViewSession(interaction, startUrl);
     });
   }
 
@@ -1455,7 +1875,7 @@ discord.on(Events.InteractionCreate, (interaction) => {
         if (parsed?.action === "search_images" && parsed.query) {
           logToFile(`[ASK ACTION] search_images: "${parsed.query}"`);
           await interaction.editReply(`🖼️ Searching images for: "${parsed.query}"...\n\n⚠️ **This feature is a work in progress, bugs are expected...**`);
-          const imageDataArr = await searchGoogleImages(parsed.query);
+          const imageDataArr = await searchDuckDuckGoImages(parsed.query);
           logToFile(`[ASK IMAGE RESULT] Got ${imageDataArr.length} images`);
           if (imageDataArr.length > 0) {
             try {
@@ -1474,7 +1894,7 @@ discord.on(Events.InteractionCreate, (interaction) => {
           addToHistory(channelId, userId, "assistant", `Searched images for: ${parsed.query}`);
         } else if (parsed?.action === "search" && parsed.query) {
           await interaction.editReply(`🔎 Searching for: "${parsed.query}"...`);
-          const results = await searchGoogle(parsed.query);
+          const results = await searchDuckDuckGo(parsed.query);
           const browserData = results.length
             ? `Search results for "${parsed.query}":\n${results.map((r, i) => `${i + 1}. ${r.title}\n${r.snippet}`).join("\n\n")}`
             : `No results found.`;
@@ -1995,7 +2415,7 @@ async function executeSingleAction(parsed: any, channel: any, userId: string, ch
   if (parsed?.action === "search_images" && parsed.query) {
     try {
       await channel.send(`🖼️ Searching images for: "${parsed.query}"...`);
-      const imageDataArr = await searchGoogleImages(parsed.query);
+      const imageDataArr = await searchDuckDuckGoImages(parsed.query);
       if (imageDataArr.length > 0) {
         const attachments = imageDataArr.map(img => new AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
         await channel.send({ content: `🖼️ **${imageDataArr[0].title || parsed.query}** (${imageDataArr.length} images)`, files: attachments });
@@ -2026,16 +2446,38 @@ async function handleMessage(message: Message): Promise<void> {
   }
 
   const isDM = !message.guild;
-  if (!isDM && (!discord.user || !message.mentions.has(discord.user))) return;
+  let userText = isDM ? message.content.trim() : message.content.replace(/<@!?(\d+)>/g, "").trim();
+  const hasPrefix = userText.startsWith(PREFIX);
+
+  if (!isDM && !hasPrefix && (!discord.user || !message.mentions.has(discord.user))) return;
 
   if (isSpamming(message.author.id)) {
     return;
   }
 
   const channel = message.channel as any;
-  const userText = isDM ? message.content.trim() : message.content.replace(/<@!?(\d+)>/g, "").trim();
+
+  let prefixCommand: string | null = null;
+  if (hasPrefix) {
+    const rest = userText.slice(PREFIX.length).trim();
+    const parts = rest.split(/\s+/);
+    prefixCommand = (parts.shift() || "").toLowerCase();
+    userText = rest;
+  }
+
   if (!userText) {
     await message.reply("Hi! What can I do for you today?");
+    return;
+  }
+
+  if (prefixCommand === "update") {
+    const isAdmin = (message.member as any)?.permissions?.has(PermissionsBitField.Flags.Administrator);
+    if (message.author.id !== OWNER_ID && !isAdmin) {
+      await message.reply("❌ Only the bot owner or server admins can use `update`.");
+      return;
+    }
+    await channel.send(`🔄 **Yobnh Update** requested by ${message.author.username}...`);
+    await updateBotFromGitHub(channel, message.author.username);
     return;
   }
 
@@ -2071,12 +2513,12 @@ async function handleMessage(message: Message): Promise<void> {
     if (typeof channel.sendTyping === "function") await channel.sendTyping();
     try {
       await channel.send(`🔎 Searching for: "${parsed.query}"...`);
-      const results = await searchGoogle(parsed.query);
+      const results = await searchDuckDuckGo(parsed.query);
       browserData = results.length
         ? `Search results for "${parsed.query}":\n${results
             .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
             .join("\n\n")}`
-        : `No Google results found for "${parsed.query}".`;
+        : `No DuckDuckGo results found for "${parsed.query}".`;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
@@ -2086,7 +2528,7 @@ async function handleMessage(message: Message): Promise<void> {
     if (typeof channel.sendTyping === "function") await channel.sendTyping();
     try {
       await channel.send(`🖼️ Searching images for: "${parsed.query}"...`);
-      const imageDataArr = await searchGoogleImages(parsed.query);
+      const imageDataArr = await searchDuckDuckGoImages(parsed.query);
       if (imageDataArr.length > 0) {
         logToFile(`[IMAGE SUCCESS] Got ${imageDataArr.length} images`);
         const attachments = imageDataArr.map(img => new AttachmentBuilder(img.imagePath, { name: path.basename(img.imagePath) }));
@@ -2109,32 +2551,32 @@ async function handleMessage(message: Message): Promise<void> {
     const cleaned = sanitizeUrl(rawUrl);
     if (!cleaned) {
       await channel.send("⚠️ The assistant returned an invalid URL to open. Please provide a valid `https://...` URL.");
-    } else if (/google\.com\/search/i.test(cleaned)) {
-      let googleQuery = userText;
-      try { googleQuery = new URL(cleaned).searchParams.get("q") || userText; } catch {}
+    } else if (/duckduckgo\.com/i.test(cleaned)) {
+      let ddgQuery = userText;
+      try { ddgQuery = new URL(cleaned).searchParams.get("q") || userText; } catch {}
       if (typeof channel.sendTyping === "function") await channel.sendTyping();
       try {
-        await channel.send(`🔎 Searching for: "${googleQuery}"...`);
-        const results = await searchGoogle(googleQuery);
+        await channel.send(`🔎 Searching for: "${ddgQuery}"...`);
+        const results = await searchDuckDuckGo(ddgQuery);
         browserData = results.length
-          ? `Search results for "${googleQuery}":\n${results
+          ? `Search results for "${ddgQuery}":\n${results
               .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
               .join("\n\n")}`
-          : `No Google results found for "${googleQuery}".`;
+          : `No DuckDuckGo results found for "${ddgQuery}".`;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
       }
-    } else if (/^(https?:\/\/)?(www\.)?google\.com\/?$/i.test(cleaned)) {
+    } else if (/^(https?:\/\/)?(www\.)?duckduckgo\.com\/?$/i.test(cleaned)) {
       if (typeof channel.sendTyping === "function") await channel.sendTyping();
       try {
         await channel.send(`🔎 Searching for: "${userText}"...`);
-        const results = await searchGoogle(userText);
+        const results = await searchDuckDuckGo(userText);
         browserData = results.length
           ? `Search results for "${userText}":\n${results
               .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
               .join("\n\n")}`
-          : `No Google results found for "${userText}".`;
+          : `No DuckDuckGo results found for "${userText}".`;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
@@ -2290,11 +2732,16 @@ async function main() {
   
   const question = (query: string): Promise<string> => 
     new Promise((resolve) => setupRl.question(query, resolve));
-    
-  const choice = (await question("Select mode (1 or 2): ")).trim();
+
+  const modeArg = process.argv.find((arg) => arg.startsWith("--mode="))?.split("=")[1];
+  const envMode = process.env.RUNNING_MODE;
+  let choice = (modeArg || envMode || "").trim();
+  if (!choice) {
+    choice = (await question("Select mode (1 or 2): ")).trim();
+  }
   setupRl.close();
 
-  if (choice === "2") {
+  if (choice === "2" || choice.toLowerCase() === "ram") {
     RUNNING_MODE = "ram";
     MAX_HISTORY = 6;
     RESPONSE_MODEL = process.env.RESPONSE_MODEL ?? (USE_MISTRAL ? "mistral-small-latest" : "gpt-4o-mini");
