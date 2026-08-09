@@ -100,6 +100,40 @@ IMPORTANT RULES:
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 `;
 
+// --- Language / Speaking Style ---
+const LANGUAGE_FILE = path.join(process.cwd(), "language.json");
+let BOT_LANGUAGE: "english" | "owo" = "english";
+
+function loadLanguage(): void {
+  try {
+    if (fs.existsSync(LANGUAGE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(LANGUAGE_FILE, "utf8"));
+      BOT_LANGUAGE = data.mode === "owo" ? "owo" : "english";
+    }
+  } catch {}
+}
+
+function saveLanguage(mode: "english" | "owo"): void {
+  BOT_LANGUAGE = mode;
+  try {
+    fs.writeFileSync(LANGUAGE_FILE, JSON.stringify({ mode }, null, 2));
+  } catch {}
+}
+
+function getSystemPrompt(): string {
+  if (BOT_LANGUAGE === "owo") {
+    return SYSTEM_PROMPT + `
+\nOWO MODE IS ACTIVE!:
+- Always talk in exaggerated OwO speak: use "uwu", "owo", "hehe", "nya~", replace r and l with w (e.g. "bwowsa", "fwiend"), stutter letters ("p-please"), and be super cute and playful.
+- Keep your replies readable and short, but very owo.
+- IMPORTANT: Keep using the exact same JSON action format whenever you need to do an action (search, open, etc.). The JSON action syntax NEVER changes.
+`;
+  }
+  return SYSTEM_PROMPT;
+}
+
+loadLanguage();
+
 // --- Anti-Spam Tracker List Map ---
 const dmTracker = new Map<string, number[]>();
 const MAX_MESSAGES_PER_MINUTE = 3; 
@@ -1155,7 +1189,7 @@ async function searchDuckDuckGoImages(query: string): Promise<Array<{ imagePath:
 }
 
 function createMessagePayload(history: ChatMessage[]): ChatMessage[] {
-  return [{ role: "system", content: SYSTEM_PROMPT }, ...cleanHistory(history)];
+  return [{ role: "system", content: getSystemPrompt() }, ...cleanHistory(history)];
 }
 
 async function debugRawHttpRequest(model: string, payload: ChatMessage[]): Promise<DebugHttpResult | null> {
@@ -1506,6 +1540,19 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
       .toJSON(),
     new SlashCommandBuilder().setName("yobnh-member").setDescription("Verify a yobnh member").toJSON(),
     new SlashCommandBuilder().setName("clearmemory").setDescription("Reset your conversation history with the AI").toJSON(),
+    new SlashCommandBuilder()
+      .setName("language")
+      .setDescription("Change the bot's speaking style (English or OwO)")
+      .addStringOption(option =>
+        option.setName("mode")
+          .setDescription("Pick a style")
+          .setRequired(true)
+          .addChoices(
+            { name: "English", value: "english" },
+            { name: "OwO", value: "owo" }
+          )
+      )
+      .toJSON(),
     new SlashCommandBuilder()
       .setName("update-channel")
       .setDescription("Set a channel to automatically receive new commits from the repo")
@@ -1862,6 +1909,15 @@ discord.on(Events.InteractionCreate, (interaction) => {
         });
       }
     });
+  }
+
+  if (interaction.commandName === "language") {
+    const mode = interaction.options.getString("mode", true) as "english" | "owo";
+    saveLanguage(mode);
+    const label = mode === "owo" ? "OwO" : "English";
+    logToFile(`[LANGUAGE] Changed to ${label} by ${interaction.user.tag}`);
+    await interaction.reply({ content: `✅ Language set to **${label}**!`, ephemeral: true });
+    return;
   }
 
   if (interaction.commandName === "health-check") {
