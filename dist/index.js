@@ -109,8 +109,6 @@ RULES FOR ACTIONS (If you explicitly need to use a tool):
 - search: {"action":"search","query":"..."}
 - open: {"action":"open","url":"https://..."}
 - launch app: {"action":"launch","app":"notepad","type":"optional text to type"}
-- move mouse: {"action":"mouse_move","x":800,"y":450}
-- click mouse: {"action":"mouse_click","x":800,"y":450,"button":"left"}
 - kick user: {"action":"kick","user":"username_or_id","reason":"optional reason"}
 - timeout user: {"action":"timeout","user":"username_or_id","duration":600,"reason":"optional reason"}
 - untimeout user: {"action":"untimeout","user":"username_or_id","reason":"optional reason"}
@@ -122,16 +120,14 @@ RULES FOR ACTIONS (If you explicitly need to use a tool):
 
 Example format for sequential actions:
 [
-  {"action":"mouse_move","x":160,"y":500},
-  {"action":"mouse_click","x":160,"y":500,"button":"left"}
+  {"action":"search","query":"example"}
 ]
 IMPORTANT RULES:
-- If you gonna use the mouse thing DONT say random chinese words
 - if someone says yobnh then you must answer because thats shorten of your name
 - If the user asks you to search for information, reply ONLY with JSON.
 - Do not say "I need to search" or "let me look that up" in chat. Do not mention toolcalls or errors.
 - NEVER open duckduckgo.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-DuckDuckGo websites only.
-- If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open, mouse_move, mouse_click, launch, or any other actions when searching for images. Just send the single search_images action and nothing else.
+- If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open, launch, or any other actions when searching for images. Just send the single search_images action and nothing else.
 - Do not mention Detg or say "aw shucks".
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 `;
@@ -1305,29 +1301,6 @@ global.askAI = async function askAI(prompt) {
         return `[Action Command]\n\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\``;
     return reply;
 };
-async function moveMouse(x, y) {
-    return new Promise((resolve, reject) => {
-        const ps = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x}, ${y})`;
-        const child = (0, child_process_1.spawn)("powershell.exe", ["-Command", ps], { stdio: "pipe" });
-        child.on("close", () => resolve(`Moved mouse to (${x}, ${y})`));
-        child.on("error", reject);
-    });
-}
-async function clickMouse(x, y, button = "left") {
-    return new Promise((resolve, reject) => {
-        const flags = button === "right" ? "0x0008, 0, 0, 0, 0); $t::mouse_event(0x0010" : "0x0002, 0, 0, 0, 0); $t::mouse_event(0x0004";
-        const ps = [
-            "Add-Type -AssemblyName System.Windows.Forms",
-            `[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(${x}, ${y})`,
-            `$sig = '[DllImport(\"user32.dll\")] public static extern void mouse_event(int f, int dx, int dy, int b, int e);'`,
-            "$t = Add-Type -MemberDefinition $sig -Name Mouse -Namespace Win32 -PassThru",
-            `$t::mouse_event(${flags}, 0, 0)`
-        ].join("; ");
-        const child = (0, child_process_1.spawn)("powershell.exe", ["-Command", ps], { stdio: "pipe" });
-        child.on("close", () => resolve(`Clicked ${button} at (${x}, ${y})`));
-        child.on("error", reject);
-    });
-}
 async function launchApp(appName, typeText) {
     const appMap = {
         notepad: "notepad.exe", calculator: "calc.exe", calc: "calc.exe",
@@ -2210,29 +2183,6 @@ discord.once(discord_js_1.Events.ClientReady, async (client) => {
     }
 });
 async function executeSingleAction(parsed, channel, userId, channelId) {
-    if (parsed?.action === "mouse_move" && parsed.x !== undefined && parsed.y !== undefined) {
-        try {
-            const result = await moveMouse(Number(parsed.x), Number(parsed.y));
-            await channel.send(`鼠标移动: ${result}`);
-            addToHistory(channelId, userId, "assistant", result);
-        }
-        catch (err) {
-            await channel.send(`⚠️ Mouse move failed: ${err instanceof Error ? err.message : String(err)}`);
-            addToHistory(channelId, userId, "assistant", `Error executing mouse_move: ${err instanceof Error ? err.message : String(err)}`);
-        }
-    }
-    if (parsed?.action === "mouse_click" && parsed.x !== undefined && parsed.y !== undefined) {
-        try {
-            const btn = parsed.button === "right" ? "right" : "left";
-            const result = await clickMouse(Number(parsed.x), Number(parsed.y), btn);
-            await channel.send(`鼠标点击: ${result}`);
-            addToHistory(channelId, userId, "assistant", result);
-        }
-        catch (err) {
-            await channel.send(`⚠️ Mouse click failed: ${err instanceof Error ? err.message : String(err)}`);
-            addToHistory(channelId, userId, "assistant", `Error executing mouse_click: ${err instanceof Error ? err.message : String(err)}`);
-        }
-    }
     if (parsed?.action === "launch" && parsed.app) {
         try {
             const result = await launchApp(String(parsed.app), parsed.type ? String(parsed.type) : undefined);
@@ -2487,7 +2437,7 @@ async function handleMessage(message) {
             }
             return;
         }
-        else if (parsed.action === "mouse_move" || parsed.action === "mouse_click" || parsed.action === "launch" || parsed.action === "kick" || parsed.action === "timeout" || parsed.action === "untimeout" || parsed.action === "ban" || parsed.action === "unban" || parsed.action === "search_images") {
+        else if (parsed.action === "launch" || parsed.action === "kick" || parsed.action === "timeout" || parsed.action === "untimeout" || parsed.action === "ban" || parsed.action === "unban" || parsed.action === "search_images") {
             await executeSingleAction(parsed, channel, userId, channelId);
             return;
         }
