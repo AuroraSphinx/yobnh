@@ -51,7 +51,6 @@ const os = __importStar(require("os"));
 const readline_1 = __importDefault(require("readline"));
 const discord_js_1 = require("discord.js");
 const openai_1 = require("openai");
-const playwright_1 = require("playwright");
 const child_process_1 = require("child_process");
 const util_1 = require("util");
 const pidusage_1 = __importDefault(require("pidusage")); // Import pidusage to track system performance loads
@@ -114,7 +113,7 @@ let isThrottled = false; // Lock flag to prevent the bot from running tasks duri
 if (PLAYWRIGHT_BROWSERS_PATH) {
     process.env.PLAYWRIGHT_BROWSERS_PATH = PLAYWRIGHT_BROWSERS_PATH;
 }
-const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have playwright so that means you can open browser and headless too act as like a user human also dont say you are ai assistant or smth pls and be like CHILL as max you think like if someone says are you a bot say just Yes and ye you get it just be chill dont use emojis
+const SYSTEM_PROMPT = `you are a girl and idk dont use emojis also you have a web fetch browsing tool so you can fetch and read web pages in the background without opening a visible browser, even on a headless linux server act as like a user human also dont say you are ai assistant or smth pls and be like CHILL as max you think like if someone says are you a bot say just Yes and ye you get it just be chill dont use emojis
 
 RULES FOR TALKING:
 - Always respond in ENGLISH (never switch to Portuguese/Spanish/etc.) unless the user clearly writes in another language. Even when browsing the web or reading pages in another language, still reply in English.
@@ -258,59 +257,11 @@ function isTempBlacklisted(userId) {
 const openai = new openai_1.OpenAI({ apiKey: OPENAI_API_KEY || MISTRAL_API_KEY });
 const conversations = new Map();
 let OWNER_ID = "";
-const activeBrowsers = new Set();
 function isOwner(userId) {
     return userId === OWNER_ID || OWNER_IDS.includes(userId);
 }
 const MAINTENANCE_SERVER_ID = "1535895840160481352";
 let maintenanceMode = false;
-const BROWSER_PROFILE_DIR = path.join(process.cwd(), "browser_profile");
-const BROWSER_PROFILE_NAME = "Yobnh";
-function ensureBrowserProfile() {
-    try {
-        if (!fs.existsSync(BROWSER_PROFILE_DIR)) {
-            fs.mkdirSync(BROWSER_PROFILE_DIR, { recursive: true });
-        }
-        const localStatePath = path.join(BROWSER_PROFILE_DIR, "Local State");
-        let state = {};
-        if (fs.existsSync(localStatePath)) {
-            try {
-                state = JSON.parse(fs.readFileSync(localStatePath, "utf-8"));
-            }
-            catch {
-                state = {};
-            }
-        }
-        if (!state.profile)
-            state.profile = {};
-        if (!state.profile.info_cache)
-            state.profile.info_cache = {};
-        if (!state.profile.info_cache.Default)
-            state.profile.info_cache.Default = {};
-        const cache = state.profile.info_cache.Default;
-        if (cache.name !== BROWSER_PROFILE_NAME) {
-            cache.name = BROWSER_PROFILE_NAME;
-            if (!cache.gaia_name)
-                cache.gaia_name = BROWSER_PROFILE_NAME;
-        }
-        state.profile.last_active_profiles = ["Default"];
-        state.profile.active_profile_level = 1;
-        fs.writeFileSync(localStatePath, JSON.stringify(state, null, 2));
-        const defaultDir = path.join(BROWSER_PROFILE_DIR, "Default");
-        if (!fs.existsSync(defaultDir)) {
-            fs.mkdirSync(defaultDir, { recursive: true });
-        }
-        const preferencesPath = path.join(defaultDir, "Preferences");
-        if (!fs.existsSync(preferencesPath)) {
-            const prefs = { profile: { name: BROWSER_PROFILE_NAME } };
-            fs.writeFileSync(preferencesPath, JSON.stringify(prefs, null, 2));
-        }
-        logToFile(`[BROWSER PROFILE] Persistent profile ready: "${BROWSER_PROFILE_NAME}" at ${BROWSER_PROFILE_DIR}`);
-    }
-    catch (err) {
-        logToFile(`[BROWSER PROFILE] Failed to ensure profile: ${err}`);
-    }
-}
 let verboseEnabled = VERBOSE;
 function debugLog(level, message, meta = null) {
     if (!verboseEnabled)
@@ -623,473 +574,167 @@ function triggerEmergencyResourceCooldown() {
         console.log("✅ [RESOURCE RECOVERY] Core temperatures stabilized. Unthrottled bot runtime services successfully.");
     }, 12000);
 }
-function canShowBrowser() {
-    if (process.platform === "win32" || process.platform === "darwin")
-        return true;
-    return Boolean(process.env.DISPLAY && process.env.DISPLAY.trim() !== "");
+// --- Web Fetch Browsing (no browser needed, works on headless Linux VPS) ---
+const FETCH_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const FETCH_HEADERS = {
+    "User-Agent": FETCH_USER_AGENT,
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+};
+function decodeHtmlEntities(text) {
+    return text
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#0*39;/gi, "'")
+        .replace(/&#x27;/gi, "'")
+        .replace(/&#x2F;/gi, "/")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&#\d+;/g, (m) => {
+        try {
+            return String.fromCharCode(parseInt(m.slice(2, -1), 10));
+        }
+        catch {
+            return m;
+        }
+    });
 }
-async function browseUrl(url, keepVisible = false, viewportWidth = 1280, viewportHeight = 720) {
-    let browser = null;
+function htmlToText(html) {
+    return html
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+        .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+        .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+        .replace(/<header[\s\S]*?<\/header>/gi, " ")
+        .replace(/<aside[\s\S]*?<\/aside>/gi, " ")
+        .replace(/<br\s*\/?>/gi, " ")
+        .replace(/<\/(?:p|div|li|h[1-6]|tr|section|article|blockquote)>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        debugLog("INFO", "Launching browser for URL", { url, keepVisible });
-        if (keepVisible && !canShowBrowser()) {
-            debugLog("WARN", "No display available, forcing headless", {});
-            keepVisible = false;
-        }
-        const launchOptions = {
-            headless: !keepVisible,
-            timeout: 60000,
-            viewport: { width: viewportWidth, height: viewportHeight },
-            locale: "en-US",
-            timezoneId: "America/New_York",
-            args: ["--lang=en-US"],
-        };
-        if (keepVisible) {
-            launchOptions.headless = false;
-            launchOptions.args = [
-                "--lang=en-US",
-                "--start-maximized",
-                "--disable-gpu",
-                "--no-restore-session-state",
-                `--window-size=${viewportWidth},${viewportHeight}`,
-                "--window-position=0,0",
-            ];
-        }
-        ensureBrowserProfile();
-        const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, launchOptions);
-        browser = context.browser();
-        activeBrowsers.add(browser);
-        let page = context.pages()[0];
-        if (!page)
-            page = await context.newPage();
-        const stalePages = context.pages().filter((p) => p !== page);
-        for (const p of stalePages) {
-            try {
-                await p.close();
-            }
-            catch { }
-        }
-        const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-        debugLog("INFO", "Browser navigated", { status: response?.status(), ok: response?.ok() });
-        const title = await page.title();
-        const content = await page.evaluate(() => {
-            const blocked = document.querySelectorAll("script, style, nav, footer, header, aside, noscript");
-            blocked.forEach((node) => node.remove());
-            return document.body.innerText.replace(/\s+/g, " ").trim().slice(0, 3000);
-        });
-        if (!keepVisible && browser) {
-            activeBrowsers.delete(browser);
-            await browser.close();
-        }
-        if (keepVisible) {
-            try {
-                await page.bringToFront();
-                await page.evaluate(() => window.focus());
-                await page.waitForTimeout(2000);
-            }
-            catch { }
-        }
-        return { title, url, content };
+        return await fetch(url, { ...options, signal: controller.signal });
     }
-    catch (error) {
-        if (browser) {
-            activeBrowsers.delete(browser);
-            await browser.close();
-        }
-        try {
-            await openWithSystem(url);
-            return { title: url, url, content: "Opened in system default browser (fallback)" };
-        }
-        catch (e) {
-            throw error;
-        }
+    finally {
+        clearTimeout(timer);
     }
 }
-async function runBrowserViewSession(interaction, startUrl) {
-    let browser = null;
-    let stopped = false;
-    let currentUrl = startUrl;
-    let status = "Starting...";
-    let activePath = null;
-    const viewDir = path.join(process.cwd(), "browser_views");
-    if (!fs.existsSync(viewDir))
-        fs.mkdirSync(viewDir, { recursive: true });
-    const buildBanner = (url, stat, progressLine = null) => {
-        const urlLine = `📍 URL: ${url.length > 26 ? url.slice(0, 25) + "…" : url}`;
-        const statusLine = `⏱  STATUS: ${stat.length > 22 ? stat.slice(0, 21) + "…" : stat}`;
-        let banner = "```\n" +
-            "+------------------------------------+\n" +
-            "|  🌐  LIVE BROWSER VIEW  🌐         |\n" +
-            "|  ------------------------------    |\n" +
-            `|  ${urlLine.padEnd(36)}|\n` +
-            `|  ${statusLine.padEnd(36)}|\n`;
-        if (progressLine) {
-            banner += `|  ${progressLine.padEnd(36)}|\n`;
-        }
-        banner +=
-            "+------------------------------------+\n" +
-                "```";
-        return banner;
-    };
-    const buildProgressBar = (elapsedMs, totalMs) => {
-        const filled = Math.min(20, Math.floor((elapsedMs / totalMs) * 20));
-        const empty = 20 - filled;
-        const remaining = Math.max(0, Math.ceil((totalMs - elapsedMs) / 1000));
-        return `[${"█".repeat(filled)}${"░".repeat(empty)}] ${remaining}s`;
-    };
-    const takeScreenshot = async () => {
-        if (!page || stopped)
-            return activePath || "";
-        try {
-            const filePath = path.join(viewDir, `view_${Date.now()}_${Math.floor(Math.random() * 9999)}.png`);
-            const buffer = await page.screenshot({ type: "png" });
-            fs.writeFileSync(filePath, buffer);
-            if (activePath) {
-                try {
-                    fs.unlinkSync(activePath);
-                }
-                catch { }
-            }
-            activePath = filePath;
-            return filePath;
-        }
-        catch (err) {
-            logToFile(`[BROWSER VIEW] Screenshot error: ${err}`);
-            return activePath || "";
-        }
-    };
-    const cleanup = async () => {
-        stopped = true;
-        if (browser) {
-            activeBrowsers.delete(browser);
-            try {
-                await browser.close();
-            }
-            catch { }
-            browser = null;
-        }
-    };
-    let page = null;
-    try {
-        ensureBrowserProfile();
-        const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
-            headless: false,
-            timeout: 60000,
-            viewport: { width: 1280, height: 800 },
-            locale: "en-US",
-            timezoneId: "America/New_York",
-            args: [
-                "--lang=en-US",
-                "--start-maximized",
-                "--disable-gpu",
-                "--window-size=1280,800",
-                "--window-position=0,0",
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        });
-        browser = context.browser();
-        activeBrowsers.add(browser);
-        page = await context.newPage();
-        await page.addInitScript(() => {
-            Object.defineProperty(navigator, "webdriver", { get: () => false });
-        });
-        logToFile(`[BROWSER VIEW] Navigating to: ${currentUrl}`);
-        try {
-            await page.goto(currentUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-            status = "Live";
-        }
-        catch (navErr) {
-            status = "Nav-failed";
-            logToFile(`[BROWSER VIEW] Initial navigation error: ${navErr}`);
-        }
-        await page.waitForTimeout(2000);
-        const firstShot = await takeScreenshot();
-        const refreshButton = new discord_js_1.ButtonBuilder().setCustomId("bv_refresh").setLabel("🔄 Refresh").setStyle(discord_js_1.ButtonStyle.Primary);
-        const changeUrlButton = new discord_js_1.ButtonBuilder().setCustomId("bv_change").setLabel("🔗 Change URL").setStyle(discord_js_1.ButtonStyle.Secondary);
-        const stopButton = new discord_js_1.ButtonBuilder().setCustomId("bv_stop").setLabel("⏹ Stop").setStyle(discord_js_1.ButtonStyle.Danger);
-        const row = new discord_js_1.ActionRowBuilder().addComponents(refreshButton, changeUrlButton, stopButton);
-        let message = await interaction.editReply({
-            content: buildBanner(currentUrl, status),
-            files: [new discord_js_1.AttachmentBuilder(firstShot, { name: "browser.png" })],
-            components: [row],
-        });
-        const collector = message.createMessageComponentCollector({
-            componentType: discord_js_1.ComponentType.Button,
-            filter: (i) => i.user.id === interaction.user.id,
-            time: 5 * 60 * 1000,
-        });
-        const AUTO_TOTAL_MS = 20_000;
-        const AUTO_INTERVAL_MS = 3_000;
-        const startTime = Date.now();
-        const autoTimer = setInterval(async () => {
-            if (stopped || !page) {
-                clearInterval(autoTimer);
-                return;
-            }
-            const elapsed = Date.now() - startTime;
-            if (elapsed >= AUTO_TOTAL_MS) {
-                clearInterval(autoTimer);
-                status = "Auto-stopped";
-                try {
-                    const finalShot = await takeScreenshot();
-                    await message.edit({
-                        content: buildBanner(currentUrl, status),
-                        files: [new discord_js_1.AttachmentBuilder(finalShot, { name: "browser.png" })],
-                        components: [row],
-                    });
-                }
-                catch { }
-                return;
-            }
-            try {
-                const shot = await takeScreenshot();
-                const progress = buildProgressBar(elapsed, AUTO_TOTAL_MS);
-                await message.edit({
-                    content: buildBanner(currentUrl, `Live (${progress})`, null),
-                    files: [new discord_js_1.AttachmentBuilder(shot, { name: "browser.png" })],
-                    components: [row],
-                });
-            }
-            catch (err) {
-                logToFile(`[BROWSER VIEW] Auto-refresh error: ${err}`);
-            }
-        }, AUTO_INTERVAL_MS);
-        collector.on("collect", async (btnInteraction) => {
-            if (stopped)
-                return;
-            try {
-                await btnInteraction.deferUpdate();
-            }
-            catch { }
-            if (btnInteraction.customId === "bv_refresh") {
-                if (!page)
-                    return;
-                try {
-                    await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => { });
-                    await page.waitForTimeout(1500);
-                    const shot = await takeScreenshot();
-                    status = stopped ? status : "Refreshed";
-                    const progress = Date.now() - startTime < AUTO_TOTAL_MS
-                        ? buildProgressBar(Date.now() - startTime, AUTO_TOTAL_MS)
-                        : null;
-                    await message.edit({
-                        content: buildBanner(currentUrl, status, progress),
-                        files: [new discord_js_1.AttachmentBuilder(shot, { name: "browser.png" })],
-                        components: [row],
-                    });
-                }
-                catch (err) {
-                    logToFile(`[BROWSER VIEW] Refresh error: ${err}`);
-                }
-            }
-            else if (btnInteraction.customId === "bv_change") {
-                try {
-                    await btnInteraction.followUp({
-                        content: "🔗 Send the new URL in your next message in this channel (60s timeout).",
-                        ephemeral: true,
-                    });
-                }
-                catch { }
-                const filter = (m) => m.author.id === interaction.user.id && !m.author.bot;
-                const collected = await btnInteraction.channel?.awaitMessages?.({
-                    filter, max: 1, time: 60_000, errors: ["time"],
-                }).catch(() => null);
-                if (!collected || collected.size === 0)
-                    return;
-                const userMsg = collected.first();
-                const newUrl = sanitizeUrl(userMsg?.content.trim() || "");
-                try {
-                    await userMsg?.delete().catch(() => { });
-                }
-                catch { }
-                if (!newUrl || !page) {
-                    try {
-                        await btnInteraction.followUp({ content: "⚠️ Invalid URL.", ephemeral: true });
-                    }
-                    catch { }
-                    return;
-                }
-                currentUrl = newUrl;
-                status = "Navigating...";
-                try {
-                    await page.goto(newUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-                    await page.waitForTimeout(1500);
-                    const shot = await takeScreenshot();
-                    status = "Navigated";
-                    await message.edit({
-                        content: buildBanner(currentUrl, status),
-                        files: [new discord_js_1.AttachmentBuilder(shot, { name: "browser.png" })],
-                        components: [row],
-                    });
-                }
-                catch (navErr) {
-                    status = "Nav-failed";
-                    logToFile(`[BROWSER VIEW] Navigate error: ${navErr}`);
-                    try {
-                        await message.edit({
-                            content: buildBanner(currentUrl, status),
-                            files: activePath ? [new discord_js_1.AttachmentBuilder(activePath, { name: "browser.png" })] : [],
-                            components: [row],
-                        });
-                    }
-                    catch { }
-                }
-            }
-            else if (btnInteraction.customId === "bv_stop") {
-                clearInterval(autoTimer);
-                await cleanup();
-                try {
-                    await message.edit({
-                        content: buildBanner(currentUrl, "Stopped"),
-                        files: activePath ? [new discord_js_1.AttachmentBuilder(activePath, { name: "browser.png" })] : [],
-                        components: [],
-                    });
-                }
-                catch { }
-                collector.stop();
-            }
-        });
-        collector.on("end", async () => {
-            clearInterval(autoTimer);
-            await cleanup();
-            try {
-                if (activePath)
-                    fs.unlinkSync(activePath);
-            }
-            catch { }
-        });
-    }
-    catch (err) {
-        logToFile(`[BROWSER VIEW] Session error: ${err}`);
-        await cleanup();
-        try {
-            const msg = err instanceof Error ? err.message : String(err);
-            await interaction.editReply(`⚠️ Browser view failed: ${msg}`);
-        }
-        catch { }
-    }
+async function browseUrl(url, _keepVisible = false, _viewportWidth = 1280, _viewportHeight = 720) {
+    debugLog("INFO", "Fetching URL", { url });
+    const response = await fetchWithTimeout(url, { redirect: "follow", headers: FETCH_HEADERS });
+    if (!response.ok)
+        throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    const html = await response.text();
+    const finalUrl = response.url || url;
+    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const title = (titleMatch ? decodeHtmlEntities(htmlToText(titleMatch[1])) : "") || finalUrl;
+    const content = htmlToText(html).slice(0, 3000);
+    debugLog("INFO", "Fetched page", { status: response.status, length: html.length });
+    return { title: title.slice(0, 200), url: finalUrl, content };
 }
-async function openWithSystem(url) {
-    const safeUrl = String(url).replace(/"/g, '"');
-    if (process.platform === "darwin") {
-        await exec(`open "${safeUrl}"`);
-        return;
+function parseDuckDuckGoHtmlResults(html) {
+    const results = [];
+    const resultRe = /<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+    let match;
+    while ((match = resultRe.exec(html)) !== null) {
+        const title = decodeHtmlEntities(htmlToText(match[2])).trim();
+        const snippet = decodeHtmlEntities(htmlToText(match[3])).trim();
+        if (title)
+            results.push({ title, snippet });
+        if (results.length >= 5)
+            break;
     }
-    else {
-        await exec(`xdg-open "${safeUrl}"`);
-        return;
+    return results;
+}
+function parseDuckDuckGoLiteResults(html) {
+    const results = [];
+    const resultRe = /<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<td[^>]*class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
+    let match;
+    while ((match = resultRe.exec(html)) !== null) {
+        const title = decodeHtmlEntities(htmlToText(match[2])).trim();
+        const snippet = decodeHtmlEntities(htmlToText(match[3])).trim();
+        if (title)
+            results.push({ title, snippet });
+        if (results.length >= 5)
+            break;
     }
+    return results;
 }
 async function searchDuckDuckGo(query) {
-    let browser = null;
     try {
         logToFile(`[SEARCH] Starting DuckDuckGo search for: "${query}"`);
-        ensureBrowserProfile();
-        const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
-            headless: false,
-            timeout: 30000,
-            args: [
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            viewport: { width: 1280, height: 800 },
-            locale: "en-US",
-        });
-        browser = context.browser();
-        activeBrowsers.add(browser);
-        const page = await context.newPage();
-        await page.addInitScript(() => {
-            Object.defineProperty(navigator, "webdriver", { get: () => false });
-        });
-        const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-        const response = await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
-        debugLog("INFO", "DuckDuckGo page loaded", { status: response?.status() });
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        const results = await page.evaluate(() => {
-            const items = [];
-            const titles = Array.from(document.querySelectorAll("a.result__a"));
-            titles.slice(0, 6).forEach((titleEl) => {
-                const container = titleEl.closest(".result, .result__body, .web-result");
-                const title = titleEl.innerText.trim();
-                const snippetEl = container?.querySelector(".result__snippet");
-                const snippet = (snippetEl?.innerText || "").trim().slice(0, 200);
-                if (title)
-                    items.push({ title, snippet });
-            });
-            return items.slice(0, 5);
-        });
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        return results;
+        const sources = [
+            `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+            `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`,
+        ];
+        for (const source of sources) {
+            try {
+                const response = await fetchWithTimeout(source, { redirect: "follow", headers: FETCH_HEADERS });
+                if (!response.ok)
+                    continue;
+                const html = await response.text();
+                const results = source.includes("lite.")
+                    ? parseDuckDuckGoLiteResults(html)
+                    : parseDuckDuckGoHtmlResults(html);
+                debugLog("INFO", "DuckDuckGo page loaded", { source, status: response.status, results: results.length });
+                if (results.length > 0)
+                    return results;
+            }
+            catch (err) {
+                debugLog("WARN", "Search source failed", { source, error: String(err) });
+            }
+        }
+        return [];
     }
     catch (error) {
         logToFile(`[SEARCH ERROR] ${error}`);
         throw error;
     }
-    finally {
-        if (browser) {
-            activeBrowsers.delete(browser);
-            await browser.close();
-        }
-    }
 }
 async function searchDuckDuckGoImages(query) {
-    let browser = null;
     const imagesDir = path.join(process.cwd(), "images_temps");
     logToFile(`[IMAGE SEARCH] Starting search for: "${query}"`);
     try {
         if (!fs.existsSync(imagesDir))
             fs.mkdirSync(imagesDir, { recursive: true });
-        logToFile(`[IMAGE SEARCH] Launching browser...`);
-        ensureBrowserProfile();
-        const context = await playwright_1.chromium.launchPersistentContext(BROWSER_PROFILE_DIR, {
-            headless: false,
-            timeout: 60000,
-            args: [
-                "--disable-blink-features=AutomationControlled",
-                "--no-first-run",
-                "--no-default-browser-check",
-            ],
-            userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            viewport: { width: 1280, height: 800 },
-            locale: "en-US",
+        const url = `https://www.bing.com/images/search?q=${encodeURIComponent(query)}&form=HDRSC2&first=1`;
+        logToFile(`[IMAGE SEARCH] Fetching: ${url}`);
+        const response = await fetchWithTimeout(url, {
+            redirect: "follow",
+            headers: { ...FETCH_HEADERS, Referer: "https://www.bing.com/" },
         });
-        browser = context.browser();
-        activeBrowsers.add(browser);
-        const page = await context.newPage();
-        await page.addInitScript(() => {
-            Object.defineProperty(navigator, "webdriver", { get: () => false });
-        });
-        const url = `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iar=images&iax=images&ia=images`;
-        logToFile(`[IMAGE SEARCH] Navigating to: ${url}`);
-        await page.goto(url, { waitUntil: "networkidle", timeout: 60000 });
-        // Wait for thumbnails to load
-        await page.waitForTimeout(5000);
-        logToFile(`[IMAGE SEARCH] Page loaded, extracting image URLs...`);
-        // Extract actual image URLs from DuckDuckGo results
-        const imageUrls = await page.evaluate(() => {
-            const results = [];
-            const imgs = document.querySelectorAll('img');
-            for (const img of Array.from(imgs)) {
-                const htmlImg = img;
-                const src = htmlImg.src || htmlImg.getAttribute('data-src') || '';
-                if (!src || !src.startsWith('http') || src.includes('data:'))
-                    continue;
-                if (src.includes('/dist/react-assets/'))
-                    continue;
-                if (src.includes('.ico'))
-                    continue;
-                const title = htmlImg.alt || '';
-                if (!results.find(r => r.url === src)) {
-                    results.push({ url: src, title });
-                }
-            }
-            return results.slice(0, 10);
-        });
+        if (!response.ok) {
+            logToFile(`[IMAGE SEARCH] HTTP ${response.status}`);
+            return [];
+        }
+        const html = await response.text();
+        const rawUrls = [];
+        const murlRe = /murl&quot;:&quot;([^&]+?)&quot;/gi;
+        let m;
+        while ((m = murlRe.exec(html)) !== null)
+            rawUrls.push(m[1]);
+        if (rawUrls.length === 0) {
+            const murlRe2 = /"murl":"([^"]+?)"/gi;
+            while ((m = murlRe2.exec(html)) !== null)
+                rawUrls.push(m[1]);
+        }
+        const imageUrls = [];
+        const seen = new Set();
+        for (const raw of rawUrls) {
+            const decoded = decodeHtmlEntities(raw.replace(/\\\//g, "/"));
+            if (!decoded.startsWith("http") || seen.has(decoded))
+                continue;
+            seen.add(decoded);
+            imageUrls.push({ url: decoded, title: query });
+            if (imageUrls.length >= 10)
+                break;
+        }
         logToFile(`[IMAGE SEARCH] Found ${imageUrls.length} image URLs`);
         // NSFW filter - blocked domains
         const nsfwDomains = [
@@ -1142,23 +787,6 @@ async function searchDuckDuckGoImages(query) {
                     return true;
                 }
             }
-            // Decode DuckDuckGo proxy URLs to check the original source
-            const uddgMatch = lowerUrl.match(/u=([^&]+)/);
-            if (uddgMatch) {
-                const decoded = decodeURIComponent(uddgMatch[1]).toLowerCase();
-                for (const domain of nsfwDomains) {
-                    if (decoded.includes(domain)) {
-                        logToFile(`[NSFW FILTER] Blocked decoded domain "${domain}"`);
-                        return true;
-                    }
-                }
-                for (const keyword of nsfwKeywords) {
-                    if (decoded.includes(keyword)) {
-                        logToFile(`[NSFW FILTER] Blocked decoded keyword "${keyword}"`);
-                        return true;
-                    }
-                }
-            }
             return false;
         }
         // Filter out NSFW images
@@ -1168,18 +796,25 @@ async function searchDuckDuckGoImages(query) {
             return true;
         });
         logToFile(`[NSFW FILTER] ${imageUrls.length} → ${safeUrls.length} safe images`);
-        // Download images via Playwright's request API (no CORS issues)
+        // Download images via web fetch (no browser / no CORS issues)
         const downloadedImages = [];
         for (let i = 0; i < Math.min(safeUrls.length, 4); i++) {
             const imgUrl = safeUrls[i].url;
             logToFile(`[IMAGE SEARCH] Downloading image ${i + 1}: ${imgUrl.slice(0, 100)}`);
             try {
-                const response = await context.request.get(imgUrl, { timeout: 15000 });
-                if (!response.ok()) {
-                    logToFile(`[IMAGE SEARCH] Image ${i + 1} HTTP ${response.status()}`);
+                const imgResponse = await fetchWithTimeout(imgUrl, {
+                    redirect: "follow",
+                    headers: {
+                        "User-Agent": FETCH_USER_AGENT,
+                        Referer: "https://www.bing.com/",
+                        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    },
+                }, 15000);
+                if (!imgResponse.ok) {
+                    logToFile(`[IMAGE SEARCH] Image ${i + 1} HTTP ${imgResponse.status}`);
                     continue;
                 }
-                const buffer = await response.body();
+                const buffer = Buffer.from(await imgResponse.arrayBuffer());
                 if (buffer.length < 1000) {
                     logToFile(`[IMAGE SEARCH] Image ${i + 1} too small (${buffer.length} bytes)`);
                     continue;
@@ -1200,13 +835,6 @@ async function searchDuckDuckGoImages(query) {
     catch (error) {
         logToFile(`[IMAGE SEARCH ERROR] ${error}`);
         return [];
-    }
-    finally {
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        if (browser) {
-            activeBrowsers.delete(browser);
-            await browser.close();
-        }
     }
 }
 function createMessagePayload(history) {
@@ -1298,21 +926,6 @@ function parseJson(value) {
         return null;
     }
 }
-function parseOpenFlags(text) {
-    if (!text)
-        return {};
-    const t = String(text).toLowerCase();
-    const flags = {};
-    if (/\bsystem\b/.test(t) || /\bdefault browser\b/.test(t) || /\bmy browser\b/.test(t) || /\bexternal\b/.test(t))
-        flags.forceSystem = true;
-    if (/\bvisible\b/.test(t) || /\bwindow\b/.test(t) || /\bdisplay\b/.test(t))
-        flags.forceVisible = true;
-    if (/\bheadless\b/.test(t))
-        flags.forceHeadless = true;
-    if (/\bchromium\b/.test(t) || /\bplaywright\b/.test(t) || /\bexe\b/.test(t))
-        flags.forceChromium = true;
-    return flags;
-}
 const discord = new discord_js_1.Client({
     intents: [
         discord_js_1.GatewayIntentBits.Guilds,
@@ -1373,18 +986,13 @@ async function registerSlashCommands(clientId, token) {
             .setName("notice-aurora")
             .setDescription("Send a notice to AuroraSphinx")
             .addStringOption(option => option.setName("message").setDescription("Your notice message").setRequired(true))
-            .toJSON(),
-        new discord_js_1.SlashCommandBuilder()
-            .setName("see-image-browser")
-            .setDescription("Open a browser and stream live screenshots for 20 seconds with control buttons")
-            .addStringOption(option => option.setName("url").setDescription("The URL to open (defaults to DuckDuckGo)").setRequired(false))
             .toJSON()
     ];
     const rest = new discord_js_1.REST({ version: "10" }).setToken(token);
     try {
         console.log("Synchronizing slash command arrays...");
         await rest.put(discord_js_1.Routes.applicationCommands(clientId), { body: guildCommands });
-        console.log("✅ Slash commands registered globally (app commands): /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora, /see-image-browser");
+        console.log("✅ Slash commands registered globally (app commands): /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora");
     }
     catch (error) {
         console.error("Failed to register slash commands:", error);
@@ -1605,22 +1213,6 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
     if (maintenanceMode && interaction.inGuild() && interaction.guildId !== MAINTENANCE_SERVER_ID) {
         interaction.reply({ content: "Sorry, YOBNH is in maintenance mode.", ephemeral: true });
         return;
-    }
-    if (interaction.commandName === "see-image-browser") {
-        setImmediate(async () => {
-            try {
-                await interaction.deferReply();
-            }
-            catch (deferError) {
-                if (deferError?.code !== 10062) {
-                    console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
-                    return;
-                }
-            }
-            const rawUrl = interaction.options.getString("url");
-            const startUrl = sanitizeUrl(rawUrl) || "https://html.duckduckgo.com/html/?q=yobnh";
-            await runBrowserViewSession(interaction, startUrl);
-        });
     }
     if (interaction.commandName === "send-dm") {
         setImmediate(async () => {
@@ -2303,56 +1895,17 @@ async function performOpenAction(parsed, channel, userText) {
             await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
         }
     }
-    else if (/^(https?:\/\/)?(www\.)?duckduckgo\.com\/?$/i.test(cleaned)) {
-        if (typeof channel.sendTyping === "function")
-            await channel.sendTyping();
-        try {
-            await channel.send(`🔎 Searching for: "${userText}"...`);
-            const results = await searchDuckDuckGo(userText);
-            browserData = results.length
-                ? `Search results for "${userText}":\n${results
-                    .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}`)
-                    .join("\n\n")}`
-                : `No DuckDuckGo results found for "${userText}".`;
-        }
-        catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            await channel.send(`⚠️ I couldn't perform the search: ${msg}.`);
-        }
-    }
     else {
-        let systemOpened = false;
-        const flags = parseOpenFlags(userText);
-        const useSystemBrowser = Boolean(flags.forceSystem && !flags.forceChromium);
-        const preferVisible = !flags.forceHeadless;
-        if (useSystemBrowser) {
-            try {
-                await openWithSystem(cleaned);
-                systemOpened = true;
-                await channel.send(`🌐 Opened in your system default browser: ${cleaned}`);
-            }
-            catch (sysErr) { }
-        }
         if (typeof channel.sendTyping === "function")
             await channel.sendTyping();
         try {
-            const mode = preferVisible ? "visible" : "headless";
-            await channel.send(`🌐 Launching Playwright Chromium for: ${cleaned} (${mode} mode)`);
-            const page = await browseUrl(cleaned, preferVisible, 1600, 900);
+            await channel.send(`🌐 Fetching: ${cleaned}`);
+            const page = await browseUrl(cleaned);
             browserData = `Opened page: ${page.title}\nURL: ${page.url}\n\n${page.content}`;
         }
         catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            if (!systemOpened) {
-                try {
-                    await channel.send(`🌐 Playwright failed, trying visible browser window...`);
-                    const page = await browseUrl(cleaned, true, 1600, 900);
-                    browserData = `Opened page (visible): ${page.title}\nURL: ${page.url}\n\n${page.content}`;
-                }
-                catch (err2) {
-                    await channel.send(`⚠️ I failed to open Playwright Chromium: ${msg}.`);
-                }
-            }
+            await channel.send(`⚠️ I failed to fetch the page: ${msg}.`);
         }
     }
     return browserData;
@@ -2508,13 +2061,6 @@ function setupGracefulShutdown() {
     const shutdown = async (signal) => {
         console.log(`\n[SHUTDOWN] Received ${signal}. Cleaning up...`);
         logToFile(`[SHUTDOWN] Received ${signal}.`);
-        for (const browser of activeBrowsers) {
-            try {
-                await browser.close();
-            }
-            catch { }
-        }
-        activeBrowsers.clear();
         saveBlacklist();
         try {
             terminalInterface?.close();

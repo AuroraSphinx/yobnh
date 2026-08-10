@@ -15,11 +15,9 @@
         "jimp": "^1.6.1",
         "nutjs": "^0.0.1",
         "openai": "^4.104.0",
-        "pidusage": "^4.0.1",
-        "playwright": "^1.60.0"
+        "pidusage": "^4.0.1"
     },
     "devDependencies": {
-        "@playwright/test": "^1.60.0",
         "@types/node": "^20.19.42",
         "@types/pidusage": "^2.0.5",
         "ts-node": "^10.9.1",

@@ -13,3 +13,13 @@ node_modules/
 
 # Runtime config
 update_channel.json
+
+# Runtime data (VPS only, not committed)
+browser_profile/
+browser_views/
+images/
+images_temps/
+community-files/
+logs.txt
+fbi.png
+
