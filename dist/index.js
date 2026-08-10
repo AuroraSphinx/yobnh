@@ -1059,6 +1059,12 @@ async function updateBotFromGitHub(channel, requestedBy) {
         }
         await send("📝 Replacing source files...");
         const protectedDirs = new Set(["node_modules", ".git", "browser_profile", "images", "images_temps", "community-files"]);
+        // Local/runtime files that must survive an update (never delete these)
+        const keepFiles = new Set([
+            ".env", ".env.local",
+            "blacklist.json", "language.json", "update_channel.json",
+            "logs.txt", "bot-errors.log", "logs",
+        ]);
         const copyTree = (src, dest) => {
             for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
                 if (protectedDirs.has(entry.name))
@@ -1074,6 +1080,20 @@ async function updateBotFromGitHub(channel, requestedBy) {
                 }
             }
         };
+        // Remove files in the working copy that no longer exist in the repo, so
+        // stale files (e.g. removed playwright configs/tests) never break the build.
+        const pruneRemoved = (src, dest, isRoot) => {
+            for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+                if (protectedDirs.has(entry.name) || keepFiles.has(entry.name))
+                    continue;
+                if (isRoot && entry.name.startsWith("."))
+                    continue;
+                if (!fs.existsSync(path.join(src, entry.name))) {
+                    fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+                }
+            }
+        };
+        pruneRemoved(srcDir, process.cwd(), true);
         copyTree(srcDir, process.cwd());
         await send("📦 Installing dependencies (`npm install`)...");
         await exec("npm install", { cwd: process.cwd(), env: execEnv, timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
