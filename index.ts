@@ -86,7 +86,6 @@ RULES FOR TALKING:
 RULES FOR ACTIONS (If you explicitly need to use a tool):
 - search: {"action":"search","query":"..."}
 - open: {"action":"open","url":"https://..."}
-- launch app: {"action":"launch","app":"notepad","type":"optional text to type"}
 - kick user: {"action":"kick","user":"username_or_id","reason":"optional reason"}
 - timeout user: {"action":"timeout","user":"username_or_id","duration":600,"reason":"optional reason"}
 - untimeout user: {"action":"untimeout","user":"username_or_id","reason":"optional reason"}
@@ -106,7 +105,7 @@ IMPORTANT RULES:
 - If the user asks you to search for information, reply ONLY with JSON.
 - Do not say "I need to search" or "let me look that up" in chat. Do not mention toolcalls or errors.
 - NEVER open duckduckgo.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-DuckDuckGo websites only.
-- If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open, launch, or any other actions when searching for images. Just send the single search_images action and nothing else.
+- If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open or any other actions when searching for images. Just send the single search_images action and nothing else.
 - Do not mention Detg or say "aw shucks".
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 `;
@@ -1324,43 +1323,6 @@ const discord = new Client({
   return reply;
 };
 
-async function launchApp(appName: string, typeText?: string): Promise<string> {
-  const appMap: Record<string, string> = {
-    notepad: "notepad.exe", calculator: "calc.exe", calc: "calc.exe",
-    paint: "mspaint.exe", explorer: "explorer.exe", cmd: "cmd.exe",
-    powershell: "powershell.exe", spotify: "spotify.exe", chrome: "chrome.exe",
-    firefox: "firefox.exe", vlc: "vlc.exe", wordpad: "wordpad.exe",
-    excel: "excel.exe", word: "winword.exe",
-    "visual studio": "devenv.exe", vscode: "code.exe", "vs code": "code.exe",
-    "visual studio code": "code.exe", rider: "rider64.exe",
-    "unity hub": "Unity Hub.exe", unity: "Unity.exe",
-    dotnet: "dotnet.exe", "dotnet studio": "dotnet.exe",
-  };
-
-  const isFullPath = appName.includes("\\") || appName.includes("/") || /^[a-zA-Z]:/.test(appName);
-  const alreadyExe = appName.toLowerCase().endsWith(".exe");
-  const exe = isFullPath ? appName : (appMap[appName.toLowerCase()] || (alreadyExe ? appName : `${appName}.exe`));
-
-  return new Promise((resolve, reject) => {
-    execFile("cmd.exe", ["/c", "start", "", exe], (err) => {
-      if (err) {
-        reject(new Error(`Failed to launch ${appName}: ${err.message}`));
-      }
-    });
-    setTimeout(async () => {
-      if (typeText) {
-        const escaped = typeText.replace(/'/g, "''").replace(/`/g, "``");
-        const ps = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${escaped}')`;
-        const psChild = spawn("powershell.exe", ["-Command", ps], { detached: true, stdio: "ignore", shell: false });
-        psChild.unref();
-        resolve(`Opened ${appName} and typed: "${typeText}"`);
-      } else {
-        resolve(`Opened ${appName}!`);
-      }
-    }, 1500);
-  });
-}
-
 const SCREEN_W = 1600;
 const SCREEN_H = 900;
 const GRID_COLS = 16;
@@ -2353,17 +2315,6 @@ discord.once(Events.ClientReady, async (client) => {
 });
 
 async function executeSingleAction(parsed: any, channel: any, userId: string, channelId: string): Promise<void> {
-  if (parsed?.action === "launch" && parsed.app) {
-    try {
-      const result = await launchApp(String(parsed.app), parsed.type ? String(parsed.type) : undefined);
-      await channel.send(`🖥️ ${result}`);
-      addToHistory(channelId, userId, "assistant", result);
-    } catch (err) {
-      await channel.send(`⚠️ Launch failed: ${err instanceof Error ? err.message : String(err)}`);
-      addToHistory(channelId, userId, "assistant", `Error launching app: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
   if (parsed?.action === "kick" && parsed.user) {
     const userQuery = String(parsed.user);
     const reason = parsed.reason || "No explicit reason provided.";
@@ -2562,7 +2513,7 @@ async function executeSingleAction(parsed: any, channel: any, userId: string, ch
     }
   }
 
-  const handledActions = ["launch", "kick", "timeout", "untimeout", "ban", "unban", "search_images"];
+  const handledActions = ["kick", "timeout", "untimeout", "ban", "unban", "search_images"];
   if (!parsed || typeof parsed !== "object" || !handledActions.includes(parsed.action)) {
     await channel.send(`⚠️ I don't have the "${parsed?.action || "that"}" ability anymore, so I couldn't do that. Try describing what you want instead.`);
     addToHistory(channelId, userId, "assistant", `Action "${parsed?.action || "unknown"}" is no longer supported.`);
