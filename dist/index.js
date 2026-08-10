@@ -279,6 +279,8 @@ const activeBrowsers = new Set();
 function isOwner(userId) {
     return userId === OWNER_ID || OWNER_IDS.includes(userId);
 }
+const MAINTENANCE_SERVER_ID = "1535895840160481352";
+let maintenanceMode = false;
 const BROWSER_PROFILE_DIR = path.join(process.cwd(), "browser_profile");
 const BROWSER_PROFILE_NAME = "Yobnh";
 function ensureBrowserProfile() {
@@ -1820,6 +1822,10 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
         interaction.reply({ content: "Sorry but you are blacklisted from YOBNH.", ephemeral: true });
         return;
     }
+    if (maintenanceMode && interaction.inGuild() && interaction.guildId !== MAINTENANCE_SERVER_ID) {
+        interaction.reply({ content: "Sorry, YOBNH is in maintenance mode.", ephemeral: true });
+        return;
+    }
     if (interaction.commandName === "grid") {
         setImmediate(async () => {
             try {
@@ -2649,6 +2655,30 @@ async function handleMessage(message) {
     }
     if (!userText) {
         await message.reply("Hi! What can I do for you today?");
+        return;
+    }
+    if (maintenanceMode && (isDM || message.guild.id !== MAINTENANCE_SERVER_ID)) {
+        const ownerToggle = prefixCommand === "maintenance" && isOwner(message.author.id);
+        if (!ownerToggle) {
+            await message.reply("Sorry, YOBNH is in maintenance mode.");
+            return;
+        }
+    }
+    if (prefixCommand === "maintenance") {
+        if (!isOwner(message.author.id)) {
+            await message.reply("❌ Only the bot owner can use `maintenance`.");
+            return;
+        }
+        const arg = (message.content.slice(PREFIX.length).trim().split(/\s+/)[1] || "").toLowerCase();
+        if (arg === "on")
+            maintenanceMode = true;
+        else if (arg === "off")
+            maintenanceMode = false;
+        else
+            maintenanceMode = !maintenanceMode;
+        await channel.send(maintenanceMode
+            ? `🔧 **Maintenance mode is now ON.** YOBNH will only work in <#${MAINTENANCE_SERVER_ID}>.`
+            : "✅ **Maintenance mode is now OFF.** YOBNH works everywhere again.");
         return;
     }
     if (prefixCommand === "update") {
