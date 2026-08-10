@@ -102,6 +102,10 @@ const GITHUB_REPO = process.env.GITHUB_REPO ?? "AuroraSphinx/yobnh";
 const PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? null;
 const VERBOSE = process.env.VERBOSE === "true";
 const PREFIX = process.env.PREFIX ?? "!";
+const OWNER_IDS = (process.env.OWNER_IDS ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
 // Variable states configured dynamically on startup
 let RUNNING_MODE = "gpu";
 let MAX_HISTORY = 20;
@@ -219,7 +223,7 @@ function saveBlacklist() {
     }
 }
 function addBlacklist(userId) {
-    if (userId === OWNER_ID)
+    if (isOwner(userId))
         return false;
     if (blacklistedUsers.has(userId))
         return false;
@@ -235,7 +239,7 @@ function removeBlacklist(userId) {
     return true;
 }
 function isBlacklisted(userId) {
-    if (userId === OWNER_ID)
+    if (isOwner(userId))
         return false;
     return blacklistedUsers.has(userId) || isTempBlacklisted(userId);
 }
@@ -247,7 +251,7 @@ function getBanDuration(offenses) {
     return Math.min(5 * Math.pow(2, offenses - 1), MAX_BAN_MINUTES);
 }
 function addTempBlacklist(userId) {
-    if (userId === OWNER_ID)
+    if (isOwner(userId))
         return { duration: 0, totalOffenses: 0 };
     const current = offenseCount.get(userId) || 0;
     offenseCount.set(userId, current + 1);
@@ -272,6 +276,9 @@ const openai = new openai_1.OpenAI({ apiKey: OPENAI_API_KEY || MISTRAL_API_KEY }
 const conversations = new Map();
 let OWNER_ID = "";
 const activeBrowsers = new Set();
+function isOwner(userId) {
+    return userId === OWNER_ID || OWNER_IDS.includes(userId);
+}
 const BROWSER_PROFILE_DIR = path.join(process.cwd(), "browser_profile");
 const BROWSER_PROFILE_NAME = "Yobnh";
 function ensureBrowserProfile() {
@@ -2646,7 +2653,7 @@ async function handleMessage(message) {
     }
     if (prefixCommand === "update") {
         const isAdmin = message.member?.permissions?.has(discord_js_1.PermissionsBitField.Flags.Administrator);
-        if (message.author.id !== OWNER_ID && !isAdmin) {
+        if (!isOwner(message.author.id) && !isAdmin) {
             await message.reply("❌ Only the bot owner or server admins can use `update`.");
             return;
         }
