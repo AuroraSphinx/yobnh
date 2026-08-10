@@ -243,25 +243,8 @@ function isBlacklisted(userId) {
         return false;
     return blacklistedUsers.has(userId) || isTempBlacklisted(userId);
 }
-// --- Temporary Blacklist System (auto-escalating) ---
+// --- Temporary Blacklist System ---
 const tempBlacklist = new Map();
-const offenseCount = new Map();
-const MAX_BAN_MINUTES = 120;
-function getBanDuration(offenses) {
-    return Math.min(5 * Math.pow(2, offenses - 1), MAX_BAN_MINUTES);
-}
-function addTempBlacklist(userId) {
-    if (isOwner(userId))
-        return { duration: 0, totalOffenses: 0 };
-    const current = offenseCount.get(userId) || 0;
-    offenseCount.set(userId, current + 1);
-    const totalOffenses = current + 1;
-    const durationMin = getBanDuration(totalOffenses);
-    const expiry = Date.now() + durationMin * 60 * 1000;
-    tempBlacklist.set(userId, expiry);
-    logToFile(`[TEMP BAN] User ${userId} banned for ${durationMin}min (offense #${totalOffenses})`);
-    return { duration: durationMin, totalOffenses };
-}
 function isTempBlacklisted(userId) {
     if (!tempBlacklist.has(userId))
         return false;
@@ -594,20 +577,7 @@ function sendHardwareWarningPopup(modeType, activeUsageValue) {
     const titleMessage = "yobnh Core Performance Monitor Warning";
     const bodyText = `Warning! Your current execution engine tracking shows that ${modeType.toUpperCase()} utilization usage is too high (around ${activeUsageValue}%).\n\nEmergency safety actions are being taken to clear performance load automatically.`;
     console.log(`\n⚠️ [HARDWARE CRITICAL WARNING] ${modeType.toUpperCase()} usage is at ${activeUsageValue}%! Showing popup window...`);
-    if (process.platform === "win32") {
-        const tempVbsFile = path.join(os.tmpdir(), "yobnh_perf_warn.vbs");
-        const sanitizedBody = bodyText.replace(/"/g, "'").replace(/\n/g, '" & vbCrLf & "');
-        const vbsContent = `MsgBox "${sanitizedBody}", 48, "${titleMessage}"`;
-        fs.writeFileSync(tempVbsFile, vbsContent);
-        const child = (0, child_process_1.spawn)("wscript.exe", [tempVbsFile], { detached: true, stdio: "ignore" });
-        child.unref();
-        setTimeout(() => { try {
-            if (fs.existsSync(tempVbsFile))
-                fs.unlinkSync(tempVbsFile);
-        }
-        catch { } }, 5000);
-    }
-    else if (process.platform === "darwin") {
+    if (process.platform === "darwin") {
         const appleScript = `display dialog "${bodyText.replace(/"/g, '\\"')}" with title "${titleMessage}" buttons {"OK"} default button "OK" with icon caution`;
         (0, child_process_1.spawn)("osascript", ["-e", appleScript], { detached: true, stdio: "ignore" }).unref();
     }
@@ -1004,22 +974,7 @@ async function runBrowserViewSession(interaction, startUrl) {
 }
 async function openWithSystem(url) {
     const safeUrl = String(url).replace(/"/g, '"');
-    if (process.platform === "win32") {
-        try {
-            await (0, child_process_1.execFile)("cmd.exe", ["/c", "start", "", safeUrl]);
-            return;
-        }
-        catch (err) {
-            try {
-                await (0, child_process_1.execFile)("rundll32.exe", ["url.dll,FileProtocolHandler", safeUrl]);
-                return;
-            }
-            catch (e) {
-                throw err;
-            }
-        }
-    }
-    else if (process.platform === "darwin") {
+    if (process.platform === "darwin") {
         await exec(`open "${safeUrl}"`);
         return;
     }
@@ -1377,173 +1332,8 @@ global.askAI = async function askAI(prompt) {
         return `[Action Command]\n\`\`\`json\n${JSON.stringify(parsed, null, 2)}\n\`\`\``;
     return reply;
 };
-const SCREEN_W = 1600;
-const SCREEN_H = 900;
-const GRID_COLS = 16;
-const GRID_ROWS = 9;
-const CELL_W = SCREEN_W / GRID_COLS;
-const CELL_H = SCREEN_H / GRID_ROWS;
-async function captureGridScreenshot(outputPath) {
-    const screenshotPath = outputPath.replace(".png", "_raw.png");
-    const escapedPath = screenshotPath.replace(/\\/g, "\\\\");
-    await new Promise((resolve, reject) => {
-        const ps = `Add-Type -AssemblyName System.Windows.Forms; $s = [System.Windows.Forms.Screen]::PrimaryScreen; $bmp = New-Object System.Drawing.Bitmap($s.Bounds.Width, $s.Bounds.Height); $g = [System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($s.Bounds.Location, [System.Drawing.Point]::Empty, $s.Bounds.Size); $bmp.Save('${escapedPath}'); $g.Dispose(); $bmp.Dispose()`;
-        const child = (0, child_process_1.spawn)("powershell.exe", ["-Command", ps], { stdio: "pipe" });
-        child.on("close", (code) => code === 0 ? resolve() : reject(new Error("Screenshot failed code " + code)));
-        child.on("error", reject);
-    });
-    const { Jimp } = require("jimp");
-    const img = await Jimp.read(screenshotPath);
-    const GRID_COLOR = 0xff0000ff;
-    const TEXT_COLOR = 0xffffffff;
-    for (let col = 0; col <= GRID_COLS; col++) {
-        const px = Math.round(col * CELL_W);
-        for (let py = 0; py < SCREEN_H; py++) {
-            if (px < SCREEN_W)
-                img.setPixelColor(GRID_COLOR, px, py);
-            if (px + 1 < SCREEN_W)
-                img.setPixelColor(GRID_COLOR, px + 1, py);
-        }
-    }
-    for (let row = 0; row <= GRID_ROWS; row++) {
-        const py = Math.round(row * CELL_H);
-        for (let px = 0; px < SCREEN_H; px++) {
-            if (py < SCREEN_H)
-                img.setPixelColor(GRID_COLOR, py, px);
-            if (py + 1 < SCREEN_H)
-                img.setPixelColor(GRID_COLOR, py + 1, px);
-        }
-    }
-    const fontMaps = {
-        A: [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0]],
-        B: [[1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 0, 0]],
-        C: [[0, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [0, 1, 1, 1, 0]],
-        D: [[1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 0, 0]],
-        E: [[1, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 1, 0]],
-        F: [[1, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0]],
-        G: [[0, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 1, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 1, 0]],
-        H: [[1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0]],
-        I: [[1, 1, 1, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [1, 1, 1, 0, 0]],
-        J: [[0, 0, 1, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]],
-        K: [[1, 0, 0, 1, 0], [1, 0, 1, 0, 0], [1, 1, 0, 0, 0], [1, 1, 0, 0, 0], [1, 0, 1, 0, 0], [1, 0, 1, 0, 0], [1, 0, 0, 1, 0]],
-        L: [[1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 1, 0]],
-        M: [[1, 0, 0, 0, 1], [1, 1, 0, 1, 1], [1, 0, 1, 0, 1], [1, 0, 1, 0, 1], [1, 0, 0, 0, 1], [1, 0, 0, 0, 1], [1, 0, 0, 0, 1]],
-        N: [[1, 0, 0, 0, 1], [1, 1, 0, 0, 1], [1, 0, 1, 0, 1], [1, 0, 1, 0, 1], [1, 0, 0, 1, 1], [1, 0, 0, 0, 1], [1, 0, 0, 0, 1]],
-        O: [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]],
-        P: [[1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0]],
-        "1": [[0, 1, 0, 0, 0], [1, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [1, 1, 1, 0, 0]],
-        "2": [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 0, 1, 0, 0], [0, 1, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 1, 0]],
-        "3": [[1, 1, 1, 0, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 1, 1, 0, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [1, 1, 1, 0, 0]],
-        "4": [[1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [1, 1, 1, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0]],
-        "5": [[1, 1, 1, 1, 0], [1, 0, 0, 0, 0], [1, 1, 1, 0, 0], [0, 0, 0, 1, 0], [0, 0, 0, 1, 0], [1, 0, 1, 0, 0], [0, 1, 1, 0, 0]],
-        "6": [[0, 1, 1, 0, 0], [1, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]],
-        "7": [[1, 1, 1, 1, 0], [0, 0, 0, 1, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0], [0, 1, 0, 0, 0]],
-        "8": [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]],
-        "9": [[0, 1, 1, 0, 0], [1, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 1, 0], [0, 0, 0, 1, 0], [1, 0, 0, 1, 0], [0, 1, 1, 0, 0]]
-    };
-    const drawPixelChar = (char, startX, startY) => {
-        const matrix = fontMaps[char];
-        if (!matrix)
-            return;
-        for (let r = 0; r < matrix.length; r++) {
-            for (let c = 0; c < matrix[r].length; c++) {
-                if (matrix[r][c] === 1) {
-                    const targetX = startX + (c * 2);
-                    const targetY = startY + (r * 2);
-                    for (let sx = 0; sx < 2; sx++) {
-                        for (let sy = 0; sy < 2; sy++) {
-                            if (targetX + sx < SCREEN_W && targetY + sy < SCREEN_H) {
-                                img.setPixelColor(TEXT_COLOR, targetX + sx, targetY + sy);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    };
-    const columns = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P"];
-    for (let row = 0; row < GRID_ROWS; row++) {
-        for (let col = 0; col < GRID_COLS; col++) {
-            const cellX = Math.round(col * CELL_W);
-            const cellY = Math.round(row * CELL_H);
-            const letter = columns[col];
-            const numberStr = String(row + 1);
-            drawPixelChar(letter, cellX + 10, cellY + 10);
-            drawPixelChar(numberStr, cellX + 24, cellY + 10);
-        }
-    }
-    await img.write(outputPath);
-    try {
-        fs.unlinkSync(screenshotPath);
-    }
-    catch { }
-}
-async function handleMaliciousFile(interaction, safeName, threatName, tmpPath) {
-    try {
-        if (fs.existsSync(tmpPath))
-            fs.unlinkSync(tmpPath);
-    }
-    catch { }
-    logToFile(`[FILE BLOCKED] "${safeName}" from ${interaction.user.tag} — ${threatName}`);
-    const banInfo = addTempBlacklist(interaction.user.id);
-    const banDurationStr = banInfo.duration >= 60
-        ? `${banInfo.duration / 60}h`
-        : `${banInfo.duration}min`;
-    if (OWNER_ID) {
-        try {
-            const owner = await discord.users.fetch(OWNER_ID);
-            const source = interaction.guild
-                ? `**Server:** ${interaction.guild.name}\n**Channel:** <#${interaction.channelId}>`
-                : "**Source:** Direct Messages";
-            await owner.send({
-                content: [
-                    `🚫 **Malicious file blocked & user banned!**`,
-                    `**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)`,
-                    `**File:** \`${safeName}\``,
-                    `**Threat:** ${threatName}`,
-                    `**Ban duration:** ${banDurationStr}`,
-                    `**Offense #:** ${banInfo.totalOffenses}`,
-                    source,
-                ].join("\n"),
-            });
-        }
-        catch { }
-    }
-    try {
-        await interaction.editReply({
-            content: `🚫 File blocked — threat detected: **${threatName}**\nYou have been temporarily banned from using this command for **${banDurationStr}**.`
-        });
-    }
-    catch { }
-}
-async function virusScan(filePath) {
-    const progFiles = process.env.ProgramFiles || "C:\\Program Files";
-    const mpCmdRun = path.join(progFiles, "Windows Defender", "MpCmdRun.exe");
-    if (!fs.existsSync(mpCmdRun)) {
-        logToFile("[VIRUS SCAN] Windows Defender not found, skipping scan");
-        return { clean: true };
-    }
-    try {
-        await exec(`"${mpCmdRun}" -Scan -ScanType 3 -File "${filePath}"`, { timeout: 120000 });
-        logToFile(`[VIRUS SCAN] Result for ${path.basename(filePath)}: clean`);
-        return { clean: true };
-    }
-    catch (err) {
-        const exitCode = err.code;
-        if (exitCode !== 2) {
-            logToFile(`[VIRUS SCAN] Scan skipped for ${path.basename(filePath)} (exit ${exitCode}): ${err.message}`);
-            return { clean: true };
-        }
-        const output = (err.stdout || "") + (err.stderr || "");
-        const threatMatch = output.match(/Threat:\s*(.+)/i) || output.match(/Name:\s*(.+)/i);
-        const threat = threatMatch?.[1]?.trim() || "Threat detected";
-        logToFile(`[VIRUS SCAN] Threat found in ${path.basename(filePath)}: ${threat}`);
-        return { clean: false, threat };
-    }
-}
 async function registerSlashCommands(clientId, token) {
     const guildCommands = [
-        new discord_js_1.SlashCommandBuilder().setName("grid").setDescription("Screenshot your screen with a grid overlay").toJSON(),
         new discord_js_1.SlashCommandBuilder()
             .setName("send-dm")
             .setDescription("Send a direct message to a user via the bot")
@@ -1594,7 +1384,7 @@ async function registerSlashCommands(clientId, token) {
     try {
         console.log("Synchronizing slash command arrays...");
         await rest.put(discord_js_1.Routes.applicationCommands(clientId), { body: guildCommands });
-        console.log("✅ Slash commands registered globally (app commands): /grid, /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora, /see-image-browser");
+        console.log("✅ Slash commands registered globally (app commands): /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora, /see-image-browser");
     }
     catch (error) {
         console.error("Failed to register slash commands:", error);
@@ -1792,23 +1582,13 @@ function restartBot() {
     try {
         const launchScript = process.argv[1] || "";
         const isCompiled = /(^|[\\/])dist[\\/]index\.js$/i.test(launchScript);
-        const npxBin = process.platform === "win32" ? "npx.cmd" : "npx";
         const nodePath = process.execPath;
-        const npxPath = path.join(NODE_BIN_DIR, npxBin);
-        if (process.platform !== "win32") {
-            const runCmd = isCompiled
-                ? `cd "${cwd}" && nohup ${nodePath} dist/index.js ${modeArg} >> logs.txt 2>&1 &`
-                : `cd "${cwd}" && PATH="${execEnv.PATH}" nohup ${npxPath} ts-node index.ts ${modeArg} >> logs.txt 2>&1 &`;
-            (0, child_process_1.spawn)("sh", ["-c", runCmd], { detached: true, stdio: "ignore" }).unref();
-            logToFile("[UPDATE] Restart scheduled (linux nohup).");
-        }
-        else {
-            const cmd = isCompiled
-                ? `start "YOBNH" /D "${cwd}" "${nodePath}" "${path.join(cwd, "dist", "index.js")}" ${modeArg}`
-                : `start "YOBNH" /D "${cwd}" "${npxPath}" ts-node index.ts ${modeArg}`;
-            (0, child_process_1.spawn)("cmd.exe", ["/c", cmd], { detached: true, stdio: "ignore" }).unref();
-            logToFile(`[UPDATE] Restart scheduled (${isCompiled ? "dist" : "ts-node"}): ${cmd}`);
-        }
+        const npxPath = path.join(NODE_BIN_DIR, "npx");
+        const runCmd = isCompiled
+            ? `cd "${cwd}" && nohup ${nodePath} dist/index.js ${modeArg} >> logs.txt 2>&1 &`
+            : `cd "${cwd}" && PATH="${execEnv.PATH}" nohup ${npxPath} ts-node index.ts ${modeArg} >> logs.txt 2>&1 &`;
+        (0, child_process_1.spawn)("sh", ["-c", runCmd], { detached: true, stdio: "ignore" }).unref();
+        logToFile("[UPDATE] Restart scheduled (linux nohup).");
     }
     catch (err) {
         logToFile(`[UPDATE] Restart failed: ${err}`);
@@ -1825,41 +1605,6 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
     if (maintenanceMode && interaction.inGuild() && interaction.guildId !== MAINTENANCE_SERVER_ID) {
         interaction.reply({ content: "Sorry, YOBNH is in maintenance mode.", ephemeral: true });
         return;
-    }
-    if (interaction.commandName === "grid") {
-        setImmediate(async () => {
-            try {
-                await interaction.deferReply();
-            }
-            catch (deferError) {
-                if (deferError?.code !== 10062) {
-                    console.error("[DISCORD TIMEOUT] Real connection failure:", deferError);
-                    return;
-                }
-            }
-            const outputPath = path.join(process.cwd(), "grid_screenshot.png");
-            try {
-                await captureGridScreenshot(outputPath);
-                const attachment = new discord_js_1.AttachmentBuilder(outputPath, { name: "grid.png" });
-                await interaction.editReply({
-                    content: "Here is your screen with a grid overlay! Cells are labeled A1-P9. Tell me a coordinate to click!",
-                    files: [attachment],
-                });
-                setTimeout(() => { try {
-                    if (fs.existsSync(outputPath))
-                        fs.unlinkSync(outputPath);
-                }
-                catch { } }, 5000);
-            }
-            catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                console.error("Grid screenshot collection or upload failed:", err);
-                try {
-                    await interaction.editReply(`Screenshot failed: ${msg}`);
-                }
-                catch { }
-            }
-        });
     }
     if (interaction.commandName === "see-image-browser") {
         setImmediate(async () => {
@@ -2206,7 +1951,7 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 const baseName = path.basename(originalName, ext);
                 const timestamp = Date.now();
                 const safeName = `${baseName}_${timestamp}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
-                tmpPath = path.join(os.tmpdir(), `yobnh_scan_${timestamp}${ext}`);
+                tmpPath = path.join(os.tmpdir(), `yobnh_file_${timestamp}${ext}`);
                 const savePath = path.join(targetDir, safeName);
                 const controller = new AbortController();
                 const timeout = setTimeout(() => controller.abort(), 120000);
@@ -2216,20 +1961,6 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                     throw new Error(`HTTP ${response.status} fetching attachment`);
                 const buffer = Buffer.from(await response.arrayBuffer());
                 fs.writeFileSync(tmpPath, buffer);
-                if (!fs.existsSync(tmpPath)) {
-                    await handleMaliciousFile(interaction, safeName, "Windows Defender real-time protection", tmpPath);
-                    return;
-                }
-                await interaction.editReply({ content: "🔎 Scanning file for threats..." });
-                const scanResult = await virusScan(tmpPath);
-                if (!scanResult.clean) {
-                    await handleMaliciousFile(interaction, safeName, scanResult.threat, tmpPath);
-                    return;
-                }
-                if (!fs.existsSync(tmpPath)) {
-                    await handleMaliciousFile(interaction, safeName, "Windows Defender real-time protection", tmpPath);
-                    return;
-                }
                 fs.copyFileSync(tmpPath, savePath);
                 try {
                     fs.unlinkSync(tmpPath);
