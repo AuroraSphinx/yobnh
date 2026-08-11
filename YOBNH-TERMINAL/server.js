@@ -88,8 +88,18 @@ function spawnShell(ws) {
 
   const opts = { host: ssh.host, port: ssh.port || 22, username: ssh.username, readyTimeout: 15000 };
   if (ssh.auth === 'key') {
+    if (!ssh.key) {
+      ws.send(JSON.stringify({ type: 'status', text: 'Config error: no SSH key set (SSH_KEY env or config.js).' }));
+      try { ws.close(); } catch (e) {}
+      return;
+    }
     opts.privateKey = Buffer.from(ssh.key);
   } else {
+    if (!ssh.password) {
+      ws.send(JSON.stringify({ type: 'status', text: 'Config error: no SSH password set (SSH_PASSWORD env or config.js).' }));
+      try { ws.close(); } catch (e) {}
+      return;
+    }
     opts.password = ssh.password;
   }
   conn.connect(opts);
