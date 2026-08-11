@@ -48,24 +48,46 @@ const wss = new WebSocketServer({
 
 function spawnShell(ws) {
   if (ssh.localShell) {
-    const child = spawnProcess('/bin/bash', ['--login'], {
-      cwd: process.env.HOME || '/',
-      env: { ...process.env, TERM: 'xterm-256color' },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    ws.stream = child.stdin;
-    ws.child = child;
-    ws.send(JSON.stringify({ type: 'status', text: 'Connected. Local shell ready.' }));
-    child.stdout.on('data', (data) => ws.send(JSON.stringify({ type: 'data', text: data.toString('utf8') })));
-    child.stderr.on('data', (data) => ws.send(JSON.stringify({ type: 'data', text: data.toString('utf8') })));
-    child.on('error', (err) => {
-      ws.send(JSON.stringify({ type: 'status', text: 'Shell error: ' + err.message }));
-      try { ws.close(); } catch (e) {}
-    });
-    child.on('close', () => {
-      try { ws.send(JSON.stringify({ type: 'status', text: '\\r\\n[local shell closed]' })); } catch (e) {}
-      try { ws.close(); } catch (e) {}
-    });
+    let attempts = 0;
+    const start = (useScript) => {
+      let dead = false;
+      const markDead = () => { dead = true; };
+      const args = useScript ? ['-qfec', '/bin/bash --login', '/dev/null'] : ['--login'];
+      const child = spawnProcess(useScript ? 'script' : '/bin/bash', args, {
+        cwd: process.env.HOME || '/',
+        env: { ...process.env, TERM: 'xterm-256color', COLUMNS: '150', LINES: '40' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      ws.stream = child.stdin;
+      ws.child = child;
+      child.stdout.on('data', (data) => {
+        try { ws.send(JSON.stringify({ type: 'data', text: data.toString('utf8') })); } catch (e) {}
+      });
+      child.stderr.on('data', (data) => {
+        try { ws.send(JSON.stringify({ type: 'data', text: data.toString('utf8') })); } catch (e) {}
+      });
+      child.on('error', (err) => {
+        if (dead) return;
+        markDead();
+        try { ws.send(JSON.stringify({ type: 'status', text: 'Shell error: ' + err.message })); } catch (e) {}
+        if (useScript && err.code === 'ENOENT') {
+          start(false);
+        } else {
+          try { ws.close(); } catch (e) {}
+        }
+      });
+      child.on('close', () => {
+        if (dead) return;
+        markDead();
+        if (ws.readyState === 1 && attempts < 3) {
+          attempts += 1;
+          try { ws.send(JSON.stringify({ type: 'status', text: '\r\n[shell closed, restarting...]' })); } catch (e) {}
+          setTimeout(() => start(true), 1500);
+        }
+      });
+    };
+    start(true);
+    try { ws.send(JSON.stringify({ type: 'status', text: 'Connected. Local shell ready.' })); } catch (e) {}
     return;
   }
 
@@ -129,7 +151,11 @@ function spawnShell(ws) {
 }
 
 wss.on('connection', (ws) => {
-  spawnShell(ws);
+  try {
+    spawnShell(ws);
+  } catch (err) {
+    try { ws.send(JSON.stringify({ type: 'status', text: 'Shell error: ' + err.message })); } catch (e) {}
+  }
 
   ws.on('message', (msg) => {
     let data;
@@ -138,21 +164,25 @@ wss.on('connection', (ws) => {
     } catch (e) {
       return;
     }
-    switch (data.type) {
-      case 'input':
-        if (ws.stream) ws.stream.write(data.text);
-        break;
-      case 'resize':
-        if (ws.stream && typeof ws.stream.setWindow === 'function') {
-          ws.stream.setWindow(data.rows, data.cols, data.height, data.width);
-        }
-        break;
+    try {
+      switch (data.type) {
+        case 'input':
+          if (ws.stream) ws.stream.write(data.text);
+          break;
+        case 'resize':
+          if (ws.stream && typeof ws.stream.setWindow === 'function') {
+            ws.stream.setWindow(data.rows, data.cols, data.height, data.width);
+          }
+          break;
+      }
+    } catch (err) {
+      try { ws.send(JSON.stringify({ type: 'status', text: 'Terminal error: ' + err.message })); } catch (e) {}
     }
   });
 
   ws.on('close', () => {
-    if (ws.stream) ws.stream.end();
-    if (ws.conn) ws.conn.end();
+    try { if (ws.stream) ws.stream.end(); } catch (e) {}
+    try { if (ws.conn) ws.conn.end(); } catch (e) {}
   });
 });
 
