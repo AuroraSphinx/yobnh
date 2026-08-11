@@ -1116,12 +1116,10 @@ async function updateBotFromGitHub(channel: any, requestedBy: string): Promise<v
     // old buggy build (crashing on the browser's resize message).
     try {
       const termDir = path.join(process.cwd(), "YOBNH-TERMINAL");
-      if (fs.existsSync(path.join(termDir, "server.js"))) {
+      const restartScript = path.join(termDir, "restart.sh");
+      if (fs.existsSync(restartScript)) {
         await send("🔄 Restarting web terminal...");
-        await exec(
-          `pkill -f "node server.js" || true; sleep 1; cd "${termDir}" && npm install --no-audit --no-fund && nohup node server.js > terminal.log 2>&1 &`,
-          { cwd: process.cwd(), env: execEnv, timeout: 300000, maxBuffer: 5 * 1024 * 1024 }
-        );
+        await exec(`bash "${restartScript}"`, { cwd: process.cwd(), env: execEnv, timeout: 300000, maxBuffer: 5 * 1024 * 1024 });
         logToFile("[UPDATE] Web terminal restarted");
       }
     } catch (err) {
