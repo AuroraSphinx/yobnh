@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { Client } = require('ssh2');
@@ -47,14 +48,30 @@ const wss = new WebSocketServer({
   },
 });
 
+function resolveShell() {
+  if (process.platform === 'win32') {
+    const candidates = [
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+      'C:\\Windows\\System32\\bash.exe',
+    ];
+    for (const c of candidates) {
+      try { fs.accessSync(c); return c; } catch (e) {}
+    }
+    return 'bash';
+  }
+  return process.env.SHELL || '/bin/bash';
+}
+
 function spawnShell(ws) {
   if (ssh.localShell) {
+    const shell = resolveShell();
     let attempts = 0;
     const start = (useScript) => {
       let dead = false;
       const markDead = () => { dead = true; };
-      const args = useScript ? ['-qfec', '/bin/bash --login', '/dev/null'] : ['--login'];
-      const child = spawnProcess(useScript ? 'script' : '/bin/bash', args, {
+      const args = useScript ? ['-qfec', shell + ' --login', '/dev/null'] : ['--login'];
+      const child = spawnProcess(useScript ? 'script' : shell, args, {
         cwd: process.env.HOME || '/',
         env: { ...process.env, TERM: 'xterm-256color', COLUMNS: '150', LINES: '40' },
         stdio: ['pipe', 'pipe', 'pipe'],
