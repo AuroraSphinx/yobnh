@@ -636,10 +636,12 @@ function parseDuckDuckGoLiteResults(html: string): SearchResult[] {
 
 async function searchDuckDuckGo(query: string): Promise<SearchResult[]> {
   try {
-    logToFile(`[SEARCH] Starting DuckDuckGo search for: "${query}"`);
+    const currentYear = new Date().getFullYear();
+    const searchQuery = /\b(19|20)\d{2}\b/.test(query) ? query : `${query} ${currentYear}`;
+    logToFile(`[SEARCH] Starting DuckDuckGo search for: "${searchQuery}"`);
     const sources = [
-      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
-      `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`,
+      `https://html.duckduckgo.com/html/?q=${encodeURIComponent(searchQuery)}`,
+      `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(searchQuery)}`,
     ];
     for (const source of sources) {
       try {
