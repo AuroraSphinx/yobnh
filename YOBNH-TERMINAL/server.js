@@ -132,7 +132,7 @@ wss.on('connection', (ws) => {
 });
 
 const PORT = process.env.PORT || 8080;
-const HOST = process.env.TERMINAL_URL || `http://localhost:${PORT}`;
+const HOST = process.env.TERMINAL_URL || `https://llama-vs-red.exe.xyz:${PORT}`;
 server.listen(PORT, () => {
   console.log(`Linux terminal running at ${HOST}`);
   console.log(`WebSocket token configured. Access the terminal at ${HOST}/terminal.html`);
