@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { Client } = require('ssh2');
+const { spawn: spawnProcess } = require('child_process');
 const ssh = require('./config');
 
 const app = express();
@@ -46,6 +47,28 @@ const wss = new WebSocketServer({
 });
 
 function spawnShell(ws) {
+  if (ssh.localShell) {
+    const child = spawnProcess('/bin/bash', ['--login'], {
+      cwd: process.env.HOME || '/',
+      env: { ...process.env, TERM: 'xterm-256color' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    ws.stream = child.stdin;
+    ws.child = child;
+    ws.send(JSON.stringify({ type: 'status', text: 'Connected. Local shell ready.' }));
+    child.stdout.on('data', (data) => ws.send(JSON.stringify({ type: 'data', text: data.toString('utf8') })));
+    child.stderr.on('data', (data) => ws.send(JSON.stringify({ type: 'data', text: data.toString('utf8') })));
+    child.on('error', (err) => {
+      ws.send(JSON.stringify({ type: 'status', text: 'Shell error: ' + err.message }));
+      try { ws.close(); } catch (e) {}
+    });
+    child.on('close', () => {
+      try { ws.send(JSON.stringify({ type: 'status', text: '\\r\\n[local shell closed]' })); } catch (e) {}
+      try { ws.close(); } catch (e) {}
+    });
+    return;
+  }
+
   const conn = new Client();
 
   conn.on('ready', () => {
@@ -120,7 +143,9 @@ wss.on('connection', (ws) => {
         if (ws.stream) ws.stream.write(data.text);
         break;
       case 'resize':
-        if (ws.stream) ws.stream.setWindow(data.rows, data.cols, data.height, data.width);
+        if (ws.stream && typeof ws.stream.setWindow === 'function') {
+          ws.stream.setWindow(data.rows, data.cols, data.height, data.width);
+        }
         break;
     }
   });
