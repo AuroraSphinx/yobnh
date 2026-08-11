@@ -1,6 +1,6 @@
 {
   "name": "yobnh-terminal",
-  "version": "1.0.0",
+  "version": "1.2.6",
   "description": "Web SSH terminal for monitoring a Linux VPS / Discord bot",
   "main": "server.js",
   "type": "commonjs",

@@ -6,6 +6,7 @@ const { WebSocketServer } = require('ws');
 const { Client } = require('ssh2');
 const { spawn: spawnProcess } = require('child_process');
 const ssh = require('./config');
+const pkg = require('./package.json');
 
 const app = express();
 const server = http.createServer(app);
@@ -35,7 +36,7 @@ app.get('/terminal.html', (req, res) => {
 });
 
 app.get('/ws-config', (req, res) => {
-  res.json({ token: wsToken });
+  res.json({ token: wsToken, version: pkg.version });
 });
 
 const wss = new WebSocketServer({

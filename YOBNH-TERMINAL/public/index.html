@@ -67,6 +67,9 @@
     function connect() {
       setStatus('CONNECTING...', false);
       fetch('/ws-config').then(r => r.json()).then(cfg => {
+        if (cfg.version) {
+          document.querySelector('#bottombar span:first-child').textContent = 'terminal v' + cfg.version;
+        }
         const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
         ws = new WebSocket(scheme + location.host + '/?token=' + encodeURIComponent(cfg.token));
 
