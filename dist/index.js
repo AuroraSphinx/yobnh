@@ -306,7 +306,8 @@ function addToHistory(channelId, userId, role, content) {
     }
 }
 function cleanHistory(history) {
-    return history.filter((entry) => entry && entry.role && entry.content && typeof entry.content === "string" && entry.content.trim());
+    return history.filter((entry) => entry && entry.role && entry.content &&
+        (typeof entry.content === "string" ? entry.content.trim() : entry.content.length > 0));
 }
 function extractJsonFromText(text) {
     if (!text || typeof text !== "string")
@@ -627,6 +628,37 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
     finally {
         clearTimeout(timer);
     }
+}
+const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
+function isImageAttachment(attachment) {
+    const contentType = (attachment.contentType || "").toLowerCase();
+    if (contentType.startsWith("image/"))
+        return true;
+    return IMAGE_EXTENSIONS.test(attachment.name || "");
+}
+async function buildVisionContentParts(message) {
+    const imageAttachments = message.attachments.filter(isImageAttachment);
+    if (imageAttachments.size === 0)
+        return [];
+    const parts = [];
+    for (const attachment of imageAttachments.values()) {
+        try {
+            const response = await fetchWithTimeout(attachment.url, { redirect: "follow" }, 30000);
+            if (!response.ok)
+                continue;
+            const buffer = Buffer.from(await response.arrayBuffer());
+            if (buffer.length < 1000)
+                continue;
+            const mime = (attachment.contentType || "").split(";")[0] || "image/png";
+            const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+            parts.push({ type: "image_url", image_url: { url: dataUrl } });
+            logToFile(`[VISION] Added image attachment "${attachment.name}" (${Math.round(buffer.length / 1024)}KB)`);
+        }
+        catch (err) {
+            logToFile(`[VISION ERROR] Failed to load image attachment "${attachment.name}": ${err}`);
+        }
+    }
+    return parts;
 }
 async function browseUrl(url, _keepVisible = false, _viewportWidth = 1280, _viewportHeight = 720) {
     debugLog("INFO", "Fetching URL", { url });
@@ -2097,7 +2129,7 @@ async function handleMessage(message) {
         prefixCommand = (parts.shift() || "").toLowerCase();
         userText = rest;
     }
-    if (!userText) {
+    if (!userText && message.attachments.size === 0) {
         await message.reply("Hi! What can I do for you today?");
         return;
     }
@@ -2439,7 +2471,19 @@ async function handleMessage(message) {
         await channel.sendTyping();
     const channelId = message.channel.id;
     const userId = message.author.id;
-    addToHistory(channelId, userId, "user", userText);
+    const imageParts = await buildVisionContentParts(message);
+    if (imageParts.length > 0) {
+        addToHistory(channelId, userId, "user", [
+            { type: "text", text: userText || "Describe this image." },
+            ...imageParts,
+        ]);
+        if (userText) {
+            await channel.send(`👁️ I see **${imageParts.length}** attached image(s), reading them now...`);
+        }
+    }
+    else {
+        addToHistory(channelId, userId, "user", userText);
+    }
     let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 256, 0.4);
     logToFile(`[AI REPLY] ${reply}`);
     let parsed = extractJsonFromText(reply);

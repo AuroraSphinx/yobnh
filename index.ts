@@ -275,7 +275,7 @@ function getHistory(channelId: string, userId: string): ChatMessage[] {
   return conversations.get(key)!;
 }
 
-function addToHistory(channelId: string, userId: string, role: ChatMessage["role"], content: string): void {
+function addToHistory(channelId: string, userId: string, role: ChatMessage["role"], content: string | VisionContentPart[]): void {
   const history = getHistory(channelId, userId);
   history.push({ role, content });
   if (history.length > MAX_HISTORY) {
@@ -285,7 +285,8 @@ function addToHistory(channelId: string, userId: string, role: ChatMessage["role
 
 function cleanHistory(history: ChatMessage[]): ChatMessage[] {
   return history.filter(
-    (entry) => entry && entry.role && entry.content && typeof entry.content === "string" && entry.content.trim(),
+    (entry) => entry && entry.role && entry.content &&
+      (typeof entry.content === "string" ? entry.content.trim() : entry.content.length > 0),
   );
 }
 
@@ -595,6 +596,36 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
+const IMAGE_EXTENSIONS = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+function isImageAttachment(attachment: { name?: string; contentType?: string | null }): boolean {
+  const contentType = (attachment.contentType || "").toLowerCase();
+  if (contentType.startsWith("image/")) return true;
+  return IMAGE_EXTENSIONS.test(attachment.name || "");
+}
+
+async function buildVisionContentParts(message: Message): Promise<VisionImagePart[]> {
+  const imageAttachments = message.attachments.filter(isImageAttachment);
+  if (imageAttachments.size === 0) return [];
+
+  const parts: VisionImagePart[] = [];
+  for (const attachment of imageAttachments.values()) {
+    try {
+      const response = await fetchWithTimeout(attachment.url, { redirect: "follow" }, 30000);
+      if (!response.ok) continue;
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length < 1000) continue;
+      const mime = (attachment.contentType || "").split(";")[0] || "image/png";
+      const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+      parts.push({ type: "image_url", image_url: { url: dataUrl } });
+      logToFile(`[VISION] Added image attachment "${attachment.name}" (${Math.round(buffer.length / 1024)}KB)`);
+    } catch (err) {
+      logToFile(`[VISION ERROR] Failed to load image attachment "${attachment.name}": ${err}`);
+    }
+  }
+  return parts;
+}
+
 async function browseUrl(url: string, _keepVisible = false, _viewportWidth = 1280, _viewportHeight = 720): Promise<BrowserPageResult> {
   debugLog("INFO", "Fetching URL", { url });
   const response = await fetchWithTimeout(url, { redirect: "follow", headers: FETCH_HEADERS });
@@ -877,7 +908,7 @@ async function createChatResponse(history: ChatMessage[], model: string, maxToke
 
     const response = await openai.chat.completions.create({
       model,
-      messages: payload,
+      messages: payload as any,
       max_tokens: maxTokens,
       temperature,
     });
@@ -2127,7 +2158,7 @@ async function handleMessage(message: Message): Promise<void> {
     userText = rest;
   }
 
-  if (!userText) {
+  if (!userText && message.attachments.size === 0) {
     await message.reply("Hi! What can I do for you today?");
     return;
   }
@@ -2478,7 +2509,18 @@ async function handleMessage(message: Message): Promise<void> {
   if (typeof channel.sendTyping === "function") await channel.sendTyping();
   const channelId = message.channel.id;
   const userId = message.author.id;
-  addToHistory(channelId, userId, "user", userText);
+  const imageParts = await buildVisionContentParts(message);
+  if (imageParts.length > 0) {
+    addToHistory(channelId, userId, "user", [
+      { type: "text", text: userText || "Describe this image." },
+      ...imageParts,
+    ]);
+    if (userText) {
+      await channel.send(`👁️ I see **${imageParts.length}** attached image(s), reading them now...`);
+    }
+  } else {
+    addToHistory(channelId, userId, "user", userText);
+  }
 
   let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 256, 0.4);
   logToFile(`[AI REPLY] ${reply}`);
@@ -2690,9 +2732,21 @@ async function runWithRetry(): Promise<void> {
 runWithRetry();
 
 // --- Interfaces ---
+interface VisionTextPart {
+  type: "text";
+  text: string;
+}
+
+interface VisionImagePart {
+  type: "image_url";
+  image_url: { url: string };
+}
+
+type VisionContentPart = VisionTextPart | VisionImagePart;
+
 interface ChatMessage {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | VisionContentPart[];
   name?: string;
 }
 
