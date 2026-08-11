@@ -1,12 +1,18 @@
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const { Client } = require('ssh2');
 const ssh = require('./config');
 
 const app = express();
 const server = http.createServer(app);
+
+// Browsers can't send Authorization headers on WebSocket connections, so the
+// WS handshake uses a token instead of Basic auth. The token is handed out by
+// /ws-config (which IS behind Basic auth) to the page.
+const wsToken = crypto.randomBytes(24).toString('hex');
 
 function authOk(req) {
   const hdr = req.headers.authorization || '';
@@ -23,7 +29,21 @@ app.use((req, res, next) => {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-const wss = new WebSocketServer({ server, verifyClient: (info, done) => done(authOk(info.req)) });
+app.get('/terminal.html', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/ws-config', (req, res) => {
+  res.json({ token: wsToken });
+});
+
+const wss = new WebSocketServer({
+  server,
+  verifyClient: (info, done) => {
+    const url = new URL(info.req.url, 'http://' + (info.req.headers.host || 'localhost'));
+    done(url.searchParams.get('token') === wsToken);
+  },
+});
 
 function spawnShell(ws) {
   const conn = new Client();
@@ -102,6 +122,8 @@ wss.on('connection', (ws) => {
 });
 
 const PORT = process.env.PORT || 8080;
+const HOST = process.env.TERMINAL_URL || `http://localhost:${PORT}`;
 server.listen(PORT, () => {
-  console.log(`Linux terminal running at http://localhost:${PORT}`);
+  console.log(`Linux terminal running at ${HOST}`);
+  console.log(`WebSocket token configured. Access the terminal at ${HOST}/terminal.html`);
 });

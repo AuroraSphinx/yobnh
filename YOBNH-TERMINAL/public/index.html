@@ -55,46 +55,58 @@
     term.writeln('Connecting to VPS...');
     fit.fit();
 
+    ws = null;
+
     function setStatus(text, on) {
       connStatus.textContent = text;
       connStatus.className = 'status' + (on ? '' : ' off');
     }
 
-    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+    function connect() {
+      setStatus('CONNECTING...', false);
+      fetch('/ws-config').then(r => r.json()).then(cfg => {
+        const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        ws = new WebSocket(scheme + location.host + '/?token=' + encodeURIComponent(cfg.token));
 
-    ws.onmessage = (e) => {
-      const m = JSON.parse(e.data);
-      if (m.type === 'data') {
-        term.write(m.text);
-      } else if (m.type === 'status') {
-        term.writeln(m.text);
-      }
-    };
-    ws.onclose = () => {
-      setStatus('DISCONNECTED', false);
-    };
-    ws.onerror = () => {
-      setStatus('CONNECTION ERROR', false);
-    };
+        ws.onmessage = (e) => {
+          const m = JSON.parse(e.data);
+          if (m.type === 'data') {
+            term.write(m.text);
+          } else if (m.type === 'status') {
+            term.writeln(m.text);
+          }
+        };
+        ws.onclose = () => {
+          setStatus('DISCONNECTED', false);
+        };
+        ws.onerror = () => {
+          setStatus('CONNECTION ERROR', false);
+        };
 
-    ws.onopen = () => {
-      setStatus('CONNECTED', true);
-      fit.fit();
-      ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols, height: 0, width: 0 }));
-    };
+        ws.onopen = () => {
+          setStatus('CONNECTED', true);
+          fit.fit();
+          ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols, height: 0, width: 0 }));
+        };
 
-    term.onData((data) => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'input', text: data }));
-      }
-    });
+        term.onData((data) => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'input', text: data }));
+          }
+        });
 
-    window.addEventListener('resize', () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        fit.fit();
-        ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols, height: 0, width: 0 }));
-      }
-    });
+        window.addEventListener('resize', () => {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            fit.fit();
+            ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols, height: 0, width: 0 }));
+          }
+        });
+      }).catch(() => {
+        setStatus('DISCONNECTED', false);
+      });
+    }
+
+    connect();
   </script>
 </body>
 </html>
