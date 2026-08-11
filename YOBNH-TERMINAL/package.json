@@ -1,0 +1,15 @@
+{
+  "name": "yobnh-terminal",
+  "version": "1.0.0",
+  "description": "Web SSH terminal for monitoring a Linux VPS / Discord bot",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "ssh2": "^1.16.0",
+    "ws": "^8.18.0"
+  }
+}
