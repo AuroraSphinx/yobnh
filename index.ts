@@ -13,7 +13,8 @@ import * as path from "path";
 import * as os from "os";
 import readline from "readline";
 import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, EmbedBuilder, Team, ActivityType, PresenceUpdateStatus, ChannelType } from "discord.js";
-import { joinVoiceChannel, getVoiceConnection } from "@discordjs/voice";
+import { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState } from "@discordjs/voice";
+const DiscordTTS = require("discord-tts");
 import { OpenAI } from "openai";
 import { exec as execCb, spawn } from "child_process";
 import { promisify } from "util";
@@ -2026,6 +2027,70 @@ async function performOpenAction(parsed: any, channel: any, userText: string): P
   return browserData;
 }
 
+async function sanitizeTtsText(text: string): Promise<string> {
+  return String(text)
+    .replace(/<@!?\d+>/g, "someone")
+    .replace(/<#\d+>/g, "this channel")
+    .replace(/<a?:\w+:\d+>/g, "")
+    .replace(/[#*_`>|~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+}
+
+async function speakReplyInVoice(member: any, reply: string): Promise<void> {
+  try {
+    if (!member?.voice?.channel) return;
+    const guild = member.guild;
+    if (!guild) return;
+    const vc = member.voice.channel;
+
+    let connection = getVoiceConnection(guild.id);
+    let didJoin = false;
+    if (!connection) {
+      connection = joinVoiceChannel({
+        channelId: vc.id,
+        guildId: guild.id,
+        adapterCreator: guild.voiceAdapterCreator as any,
+      });
+      didJoin = true;
+      try {
+        await entersState(connection, VoiceConnectionStatus.Ready, 10_000);
+      } catch {
+        connection.destroy();
+        return;
+      }
+    }
+
+    const text = await sanitizeTtsText(reply);
+    if (!text) {
+      if (didJoin) connection.destroy();
+      return;
+    }
+
+    const player = createAudioPlayer();
+    connection.subscribe(player);
+    const stream = DiscordTTS.getVoiceStream(text, { lang: "en", timeout: 15_000 });
+    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+    player.play(resource);
+    logToFile(`[TTS] Speaking reply (${text.length} chars)`);
+
+    await new Promise<void>((resolve) => {
+      const done = () => resolve();
+      player.once(AudioPlayerStatus.Idle, done);
+      player.once(AudioPlayerStatus.AutoPaused, done);
+      player.once("error", (err: any) => {
+        console.error("TTS playback error:", err);
+        done();
+      });
+    });
+    player.stop();
+    if (didJoin) connection.destroy();
+  } catch (err) {
+    logToFile(`[TTS ERROR] ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function handleMessage(message: Message): Promise<void> {
   if (message.author.bot) return;
 
@@ -2450,6 +2515,7 @@ async function handleMessage(message: Message): Promise<void> {
       for (const chunk of chunks) {
         await channel.send(chunk);
       }
+      void speakReplyInVoice(message.member, reply);
     }
     return;
   }
@@ -2460,6 +2526,7 @@ async function handleMessage(message: Message): Promise<void> {
   for (const chunk of chunks) {
     await channel.send(chunk);
   }
+  void speakReplyInVoice(message.member, reply);
 }
 
 discord.on(Events.MessageCreate, async (message) => {

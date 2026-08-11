@@ -51,6 +51,7 @@ const os = __importStar(require("os"));
 const readline_1 = __importDefault(require("readline"));
 const discord_js_1 = require("discord.js");
 const voice_1 = require("@discordjs/voice");
+const DiscordTTS = require("discord-tts");
 const openai_1 = require("openai");
 const child_process_1 = require("child_process");
 const util_1 = require("util");
@@ -2002,6 +2003,70 @@ async function performOpenAction(parsed, channel, userText) {
     }
     return browserData;
 }
+async function sanitizeTtsText(text) {
+    return String(text)
+        .replace(/<@!?\d+>/g, "someone")
+        .replace(/<#\d+>/g, "this channel")
+        .replace(/<a?:\w+:\d+>/g, "")
+        .replace(/[#*_`>|~]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 200);
+}
+async function speakReplyInVoice(member, reply) {
+    try {
+        if (!member?.voice?.channel)
+            return;
+        const guild = member.guild;
+        if (!guild)
+            return;
+        const vc = member.voice.channel;
+        let connection = (0, voice_1.getVoiceConnection)(guild.id);
+        let didJoin = false;
+        if (!connection) {
+            connection = (0, voice_1.joinVoiceChannel)({
+                channelId: vc.id,
+                guildId: guild.id,
+                adapterCreator: guild.voiceAdapterCreator,
+            });
+            didJoin = true;
+            try {
+                await (0, voice_1.entersState)(connection, voice_1.VoiceConnectionStatus.Ready, 10_000);
+            }
+            catch {
+                connection.destroy();
+                return;
+            }
+        }
+        const text = await sanitizeTtsText(reply);
+        if (!text) {
+            if (didJoin)
+                connection.destroy();
+            return;
+        }
+        const player = (0, voice_1.createAudioPlayer)();
+        connection.subscribe(player);
+        const stream = DiscordTTS.getVoiceStream(text, { lang: "en", timeout: 15_000 });
+        const resource = (0, voice_1.createAudioResource)(stream, { inputType: voice_1.StreamType.Arbitrary });
+        player.play(resource);
+        logToFile(`[TTS] Speaking reply (${text.length} chars)`);
+        await new Promise((resolve) => {
+            const done = () => resolve();
+            player.once(voice_1.AudioPlayerStatus.Idle, done);
+            player.once(voice_1.AudioPlayerStatus.AutoPaused, done);
+            player.once("error", (err) => {
+                console.error("TTS playback error:", err);
+                done();
+            });
+        });
+        player.stop();
+        if (didJoin)
+            connection.destroy();
+    }
+    catch (err) {
+        logToFile(`[TTS ERROR] ${err instanceof Error ? err.message : String(err)}`);
+    }
+}
 async function handleMessage(message) {
     if (message.author.bot)
         return;
@@ -2410,6 +2475,7 @@ async function handleMessage(message) {
             for (const chunk of chunks) {
                 await channel.send(chunk);
             }
+            void speakReplyInVoice(message.member, reply);
         }
         return;
     }
@@ -2418,6 +2484,7 @@ async function handleMessage(message) {
     for (const chunk of chunks) {
         await channel.send(chunk);
     }
+    void speakReplyInVoice(message.member, reply);
 }
 discord.on(discord_js_1.Events.MessageCreate, async (message) => {
     try {
