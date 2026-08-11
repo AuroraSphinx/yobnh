@@ -100,7 +100,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const GITHUB_REPO = process.env.GITHUB_REPO ?? "AuroraSphinx/yobnh";
 const PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? null;
 const VERBOSE = process.env.VERBOSE === "true";
-const PREFIX = process.env.PREFIX ?? "!";
+const PREFIX = process.env.PREFIX ?? "&";
 const OWNER_IDS = (process.env.OWNER_IDS ?? "")
     .split(",")
     .map((id) => id.trim())
