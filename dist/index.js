@@ -50,6 +50,7 @@ const path = __importStar(require("path"));
 const os = __importStar(require("os"));
 const readline_1 = __importDefault(require("readline"));
 const discord_js_1 = require("discord.js");
+const voice_1 = require("@discordjs/voice");
 const openai_1 = require("openai");
 const child_process_1 = require("child_process");
 const util_1 = require("util");
@@ -935,6 +936,7 @@ const discord = new discord_js_1.Client({
         discord_js_1.GatewayIntentBits.DirectMessages,
         discord_js_1.GatewayIntentBits.GuildMembers,
         discord_js_1.GatewayIntentBits.GuildBans, // Added for unban support functionality clarity
+        discord_js_1.GatewayIntentBits.GuildVoiceStates,
     ]
 });
 global.discordClientInstance = discord;
@@ -987,13 +989,27 @@ async function registerSlashCommands(clientId, token) {
             .setName("notice-aurora")
             .setDescription("Send a notice to AuroraSphinx")
             .addStringOption(option => option.setName("message").setDescription("Your notice message").setRequired(true))
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("join")
+            .setDescription("Make YOBNH join a voice channel")
+            .addChannelOption(option => option.setName("channel")
+            .setDescription("Voice channel to join (defaults to your current one)")
+            .addChannelTypes(discord_js_1.ChannelType.GuildVoice)
+            .setRequired(false))
+            .setDMPermission(false)
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("leave")
+            .setDescription("Make YOBNH leave the voice channel")
+            .setDMPermission(false)
             .toJSON()
     ];
     const rest = new discord_js_1.REST({ version: "10" }).setToken(token);
     try {
         console.log("Synchronizing slash command arrays...");
         await rest.put(discord_js_1.Routes.applicationCommands(clientId), { body: guildCommands });
-        console.log("✅ Slash commands registered globally (app commands): /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora");
+        console.log("✅ Slash commands registered globally (app commands): /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora, /join, /leave");
     }
     catch (error) {
         console.error("Failed to register slash commands:", error);
@@ -1657,6 +1673,50 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 await interaction.editReply({ content: "❌ Failed to send the notice. The owner may have DMs disabled." });
             }
         });
+    }
+    if (interaction.commandName === "join") {
+        setImmediate(async () => {
+            if (!interaction.inCachedGuild()) {
+                await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+                return;
+            }
+            const member = interaction.member;
+            const targetChannel = interaction.options.getChannel("channel") ?? member?.voice?.channel;
+            if (!targetChannel || targetChannel.type !== discord_js_1.ChannelType.GuildVoice) {
+                await interaction.reply({ content: "❌ You need to be in a voice channel, or specify one with the `channel` option.", ephemeral: true });
+                return;
+            }
+            try {
+                (0, voice_1.joinVoiceChannel)({
+                    channelId: targetChannel.id,
+                    guildId: interaction.guildId,
+                    adapterCreator: interaction.guild.voiceAdapterCreator,
+                });
+                logToFile(`[VOICE] ${interaction.user.tag} (${interaction.user.id}) made YOBNH join ${targetChannel.name}`);
+                await interaction.reply({ content: `🔊 Joined **${targetChannel.name}**!` });
+            }
+            catch (err) {
+                await interaction.reply({ content: `❌ Failed to join the voice channel: ${err?.message || err}`, ephemeral: true });
+            }
+        });
+        return;
+    }
+    if (interaction.commandName === "leave") {
+        setImmediate(async () => {
+            if (!interaction.inCachedGuild()) {
+                await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+                return;
+            }
+            const connection = (0, voice_1.getVoiceConnection)(interaction.guildId);
+            if (!connection) {
+                await interaction.reply({ content: "❌ I'm not in a voice channel in this server.", ephemeral: true });
+                return;
+            }
+            connection.destroy();
+            logToFile(`[VOICE] ${interaction.user.tag} (${interaction.user.id}) made YOBNH leave voice`);
+            await interaction.reply({ content: "👋 Left the voice channel!" });
+        });
+        return;
     }
 });
 discord.once(discord_js_1.Events.ClientReady, async (client) => {
