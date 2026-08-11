@@ -989,13 +989,7 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
       .toJSON(),
     new SlashCommandBuilder()
       .setName("join")
-      .setDescription("Make YOBNH join a voice channel")
-      .addChannelOption(option =>
-        option.setName("channel")
-          .setDescription("Voice channel to join (defaults to your current one)")
-          .addChannelTypes(ChannelType.GuildVoice)
-          .setRequired(false)
-      )
+      .setDescription("Make YOBNH join the voice channel you are in")
       .setDMPermission(false)
       .toJSON(),
     new SlashCommandBuilder()
@@ -1698,9 +1692,9 @@ discord.on(Events.InteractionCreate, (interaction) => {
         return;
       }
       const member = interaction.member;
-      const targetChannel = (interaction.options.getChannel("channel") as any) ?? member?.voice?.channel;
+      const targetChannel = member?.voice?.channel;
       if (!targetChannel || targetChannel.type !== ChannelType.GuildVoice) {
-        await interaction.reply({ content: "❌ You need to be in a voice channel, or specify one with the `channel` option.", ephemeral: true });
+        await interaction.reply({ content: "❌ You are not in VC!", ephemeral: true });
         return;
       }
       try {
