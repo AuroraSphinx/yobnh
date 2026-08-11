@@ -1111,6 +1111,23 @@ async function updateBotFromGitHub(channel: any, requestedBy: string): Promise<v
     await send("🏗️ Building (`npm run build`)...");
     await exec("npm run build", { cwd: process.cwd(), env: execEnv, timeout: 600000, maxBuffer: 20 * 1024 * 1024 });
 
+    // Restart the web terminal so it also picks up the new code. Plain
+    // updates never restarted it, which is why the terminal kept running the
+    // old buggy build (crashing on the browser's resize message).
+    try {
+      const termDir = path.join(process.cwd(), "YOBNH-TERMINAL");
+      if (fs.existsSync(path.join(termDir, "server.js"))) {
+        await send("🔄 Restarting web terminal...");
+        await exec(
+          `pkill -f "node server.js" || true; sleep 1; cd "${termDir}" && npm install --no-audit --no-fund && nohup node server.js > terminal.log 2>&1 &`,
+          { cwd: process.cwd(), env: execEnv, timeout: 300000, maxBuffer: 5 * 1024 * 1024 }
+        );
+        logToFile("[UPDATE] Web terminal restarted");
+      }
+    } catch (err) {
+      logToFile(`[UPDATE] Web terminal restart failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     logToFile(`[UPDATE] Bot updated to ${latestSha.slice(0, 7)} (${latestMessage}) by ${requestedBy}`);
     conversations.clear();
     await send("✅ **Update complete!** Restarting the bot...");
