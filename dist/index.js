@@ -2023,9 +2023,10 @@ async function handleMessage(message) {
     }
     const channel = message.channel;
     let prefixCommand = null;
+    let parts = [];
     if (hasPrefix) {
         const rest = userText.slice(PREFIX.length).trim();
-        const parts = rest.split(/\s+/);
+        parts = rest.split(/\s+/);
         prefixCommand = (parts.shift() || "").toLowerCase();
         userText = rest;
     }
@@ -2072,6 +2073,298 @@ async function handleMessage(message) {
         const roundtrip = sent.createdTimestamp - message.createdTimestamp;
         const wsPing = typeof discord.ws?.ping === "number" ? discord.ws.ping : "N/A";
         await sent.edit(`🏓 **Pong!**\nWebSocket: \`${wsPing}ms\`\nRoundtrip: \`${roundtrip}ms\``);
+        return;
+    }
+    if (prefixCommand === "ask") {
+        userText = parts.join(" ").trim();
+        if (!userText) {
+            await message.reply("❌ Usage: `&ask <prompt>`");
+            return;
+        }
+    }
+    if (prefixCommand === "clearmemory") {
+        const key = `${message.channel.id}-${message.author.id}`;
+        conversations.delete(key);
+        await message.reply("✅ Your conversation history has been cleared.");
+        return;
+    }
+    if (prefixCommand === "yobnh-member") {
+        await message.reply("YOBNH SHOULD BE VERIFIED NOW");
+        return;
+    }
+    if (prefixCommand === "language") {
+        const mode = (parts[0] || "").toLowerCase();
+        if (mode !== "english" && mode !== "owo") {
+            await message.reply("❌ Usage: `&language english` or `&language owo`.");
+            return;
+        }
+        saveLanguage(mode);
+        const label = mode === "owo" ? "OwO" : "English";
+        logToFile(`[LANGUAGE] Changed to ${label} by ${message.author.tag}`);
+        await message.reply(`✅ Language set to **${label}**!`);
+        return;
+    }
+    if (prefixCommand === "health-check") {
+        try {
+            const stats = await (0, pidusage_1.default)(process.pid);
+            const totalMem = os.totalmem();
+            const memUsedPercent = Math.round((stats.memory / totalMem) * 100);
+            const cpuPercent = Math.round(stats.cpu);
+            const memUsedMB = Math.round(stats.memory / 1024 / 1024);
+            const memTotalMB = Math.round(totalMem / 1024 / 1024);
+            const uptimeMs = process.uptime() * 1000;
+            const uptimeDays = Math.floor(uptimeMs / 86400000);
+            const uptimeHours = Math.floor((uptimeMs % 86400000) / 3600000);
+            const uptimeMinutes = Math.floor((uptimeMs % 3600000) / 60000);
+            const uptimeStr = uptimeDays > 0
+                ? `${uptimeDays}d ${uptimeHours}h ${uptimeMinutes}m`
+                : uptimeHours > 0
+                    ? `${uptimeHours}h ${uptimeMinutes}m`
+                    : `${uptimeMinutes}m`;
+            const guildCount = discord.guilds.cache.size;
+            const userCount = discord.users.cache.size;
+            const pingLatency = discord.ws.ping;
+            const conversationCount = conversations.size;
+            let healthScore = 0;
+            if (cpuPercent < 30)
+                healthScore += 2;
+            else if (cpuPercent < 60)
+                healthScore += 1;
+            if (memUsedPercent < 50)
+                healthScore += 2;
+            else if (memUsedPercent < 75)
+                healthScore += 1;
+            if (pingLatency < 100)
+                healthScore += 2;
+            else if (pingLatency < 250)
+                healthScore += 1;
+            if (!isThrottled)
+                healthScore += 1;
+            let healthStatus;
+            let healthColor;
+            if (healthScore >= 7) {
+                healthStatus = "Great";
+                healthColor = 0x00e676;
+            }
+            else if (healthScore >= 5) {
+                healthStatus = "Good";
+                healthColor = 0x66bb6a;
+            }
+            else if (healthScore >= 3) {
+                healthStatus = "Mid";
+                healthColor = 0xffa726;
+            }
+            else {
+                healthStatus = "Bad";
+                healthColor = 0xef5350;
+            }
+            const statusIcon = isThrottled ? "Throttled" : "Normal";
+            const embed = new discord_js_1.EmbedBuilder()
+                .setTitle(`${BOT_NAME} ${BOT_VERSION}`)
+                .setColor(healthColor)
+                .addFields({ name: "Status", value: `**${healthStatus}**`, inline: true }, { name: "Uptime", value: uptimeStr, inline: true }, { name: "Ping", value: `${pingLatency}ms`, inline: true }, { name: "CPU Usage", value: `${cpuPercent}%`, inline: true }, { name: "Memory Usage", value: `${memUsedPercent}% (${memUsedMB}/${memTotalMB} MB)`, inline: true }, { name: "Run Mode", value: RUNNING_MODE.toUpperCase(), inline: true }, { name: "Throttle State", value: statusIcon, inline: true }, { name: "Guilds", value: `${guildCount}`, inline: true }, { name: "Cached Users", value: `${userCount}`, inline: true }, { name: "Active Conversations", value: `${conversationCount}`, inline: true }, { name: "Model", value: `\`${RESPONSE_MODEL || "N/A"}\``, inline: false })
+                .setFooter({ text: `Health Score: ${healthScore}/8` })
+                .setTimestamp();
+            await channel.send({ embeds: [embed] });
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error("Health check failed:", err);
+            await channel.send(`Health check failed: ${msg}`);
+        }
+        return;
+    }
+    if (prefixCommand === "join") {
+        if (isDM) {
+            await message.reply("❌ This command only works in a server.");
+            return;
+        }
+        const targetChannel = message.member?.voice?.channel;
+        if (!targetChannel || targetChannel.type !== discord_js_1.ChannelType.GuildVoice) {
+            await message.reply("❌ You are not in VC!");
+            return;
+        }
+        try {
+            (0, voice_1.joinVoiceChannel)({
+                channelId: targetChannel.id,
+                guildId: message.guild.id,
+                adapterCreator: message.guild.voiceAdapterCreator,
+            });
+            logToFile(`[VOICE] ${message.author.tag} (${message.author.id}) made YOBNH join ${targetChannel.name}`);
+            await channel.send(`🔊 Joined **${targetChannel.name}**!`);
+        }
+        catch (err) {
+            await channel.send(`❌ Failed to join the voice channel: ${err?.message || err}`);
+        }
+        return;
+    }
+    if (prefixCommand === "leave") {
+        if (isDM) {
+            await message.reply("❌ This command only works in a server.");
+            return;
+        }
+        const connection = (0, voice_1.getVoiceConnection)(message.guild.id);
+        if (!connection) {
+            await message.reply("❌ I'm not in a voice channel in this server.");
+            return;
+        }
+        connection.destroy();
+        logToFile(`[VOICE] ${message.author.tag} (${message.author.id}) made YOBNH leave voice`);
+        await channel.send("👋 Left the voice channel!");
+        return;
+    }
+    if (prefixCommand === "send-dm") {
+        const isAdmin = message.member?.permissions?.has(discord_js_1.PermissionsBitField.Flags.Administrator);
+        if (!isOwner(message.author.id) && !isAdmin) {
+            await message.reply("❌ Only admins can use `send-dm`.");
+            return;
+        }
+        const targetId = parts[0]?.trim();
+        const dmMessage = parts.slice(1).join(" ").trim();
+        if (!targetId || !dmMessage) {
+            await message.reply("❌ Usage: `&send-dm <user_id> <message>`");
+            return;
+        }
+        try {
+            const targetUser = await discord.users.fetch(targetId, { force: true });
+            const dmChannel = await targetUser.createDM();
+            await dmChannel.send(dmMessage);
+            await message.reply(`✅ Successfully sent direct message to **${targetUser.tag}**!`);
+        }
+        catch (err) {
+            console.error("Prefix DM Command Error:", err);
+            await message.reply(`❌ **Delivery Failed.** This user may have their DMs locked down, or the User ID is invalid.`);
+        }
+        return;
+    }
+    if (prefixCommand === "notice-aurora") {
+        const msgContent = parts.join(" ").trim();
+        if (!msgContent) {
+            await message.reply("❌ Usage: `&notice-aurora <message>`");
+            return;
+        }
+        if (!OWNER_ID) {
+            await message.reply("❌ Bot owner is not configured yet.");
+            return;
+        }
+        try {
+            const owner = await discord.users.fetch(OWNER_ID);
+            const channelName = isDM ? "Direct Messages" : `#${message.channel?.name || "unknown"}`;
+            const guildName = message.guild?.name || "Direct Messages";
+            const messageLink = isDM
+                ? `https://discord.com/channels/@me/${message.channel.id}`
+                : `https://discord.com/channels/${message.guild.id}/${message.channel.id}`;
+            const embed = new discord_js_1.EmbedBuilder()
+                .setColor(0x5865F2)
+                .setTitle("Notice from Aurora")
+                .setDescription(msgContent)
+                .addFields({ name: "From", value: `${message.author.tag} (\`${message.author.id}\`)`, inline: true }, { name: "Server", value: guildName, inline: true }, { name: "Channel", value: channelName, inline: true })
+                .setTimestamp();
+            await owner.send({ content: messageLink, embeds: [embed] });
+            await message.reply("✅ Your notice has been sent to AuroraSphinx!");
+        }
+        catch (err) {
+            logToFile(`[NOTICE ERROR] Failed to send notice from ${message.author.tag}: ${err}`);
+            await message.reply("❌ Failed to send the notice. The owner may have DMs disabled.");
+        }
+        return;
+    }
+    if (prefixCommand === "update-channel") {
+        const isAdmin = message.member?.permissions?.has(discord_js_1.PermissionsBitField.Flags.Administrator);
+        if (!isOwner(message.author.id) && !isAdmin) {
+            await message.reply("❌ Only admins can use `update-channel`.");
+            return;
+        }
+        const disable = parts.includes("disable") || parts.includes("off");
+        if (disable) {
+            saveUpdateChannelConfig({ channelId: null, lastSha: null });
+            await channel.send("✅ Automatic commit updates are now **disabled**.");
+            return;
+        }
+        const targetId = (parts[0] || "").replace(/[<#>]/g, "");
+        if (!targetId) {
+            await message.reply("❌ Usage: `&update-channel <#channel> [disable]`");
+            return;
+        }
+        if (!GITHUB_TOKEN) {
+            await channel.send("❌ No `GITHUB_TOKEN` environment variable is set. Cannot access the private repository.");
+            return;
+        }
+        try {
+            const config = loadUpdateChannelConfig();
+            saveUpdateChannelConfig({ channelId: targetId, lastSha: config.lastSha });
+            const commits = await fetchLatestCommits(10);
+            if (!commits.length) {
+                saveUpdateChannelConfig({ channelId: targetId, lastSha: null });
+                await channel.send(`✅ Automatic commit updates **enabled** in <#${targetId}>. The repo currently has no commits.`);
+                return;
+            }
+            await sendEmbedsToChannel(targetId, buildCommitEmbeds(commits));
+            saveUpdateChannelConfig({ channelId: targetId, lastSha: commits[0].sha });
+            await channel.send(`✅ Automatic commit updates **enabled** in <#${targetId}>. Posted the latest **${commits.length}** commit(s); new commits will be auto-posted every 5 minutes.`);
+        }
+        catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const config = loadUpdateChannelConfig();
+            saveUpdateChannelConfig({ channelId: targetId, lastSha: config.lastSha });
+            await channel.send(`❌ **Commit Fetch Failed.** Channel was saved, but fetching commits failed:\n\`\`\`${msg}\`\`\``);
+        }
+        return;
+    }
+    if (prefixCommand === "send-file") {
+        const attachment = message.attachments.first();
+        if (!attachment) {
+            await message.reply("❌ Usage: `&send-file` with an attached file.");
+            return;
+        }
+        let tmpPath = "";
+        try {
+            const targetDir = path.join(process.cwd(), "community-files", "files-sent");
+            fs.mkdirSync(targetDir, { recursive: true });
+            const originalName = attachment.name;
+            const ext = path.extname(originalName);
+            const baseName = path.basename(originalName, ext);
+            const timestamp = Date.now();
+            const safeName = `${baseName}_${timestamp}${ext}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+            tmpPath = path.join(os.tmpdir(), `yobnh_file_${timestamp}${ext}`);
+            const savePath = path.join(targetDir, safeName);
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 120000);
+            const response = await fetch(attachment.url, { signal: controller.signal });
+            clearTimeout(timeout);
+            if (!response.ok)
+                throw new Error(`HTTP ${response.status} fetching attachment`);
+            const buffer = Buffer.from(await response.arrayBuffer());
+            fs.writeFileSync(tmpPath, buffer);
+            fs.copyFileSync(tmpPath, savePath);
+            try {
+                fs.unlinkSync(tmpPath);
+            }
+            catch { }
+            logToFile(`[FILE] Saved "${safeName}" from ${message.author.tag} (${message.author.id})`);
+            if (OWNER_ID) {
+                try {
+                    const owner = await discord.users.fetch(OWNER_ID);
+                    const source = message.guild
+                        ? `**Server:** ${message.guild.name}\n**Channel:** <#${message.channel.id}>`
+                        : "**Source:** Direct Messages";
+                    await owner.send({
+                        content: `📁 **File received!**\n**From:** ${message.author.tag} (\`${message.author.id}\`)\n**File:** \`${safeName}\`\n${source}`
+                    });
+                }
+                catch { }
+            }
+            await message.reply(`✅ File saved as \`${safeName}\``);
+        }
+        catch (err) {
+            logToFile(`[FILE ERROR] Failed to save file from ${message.author.tag}: ${err}`);
+            try {
+                if (fs.existsSync(tmpPath))
+                    fs.unlinkSync(tmpPath);
+            }
+            catch { }
+            await message.reply("❌ Failed to save the file. Try again later.");
+        }
         return;
     }
     logToFile(`[MSG] ${message.author.tag} (${message.author.id}): ${userText}`);
