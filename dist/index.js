@@ -53,6 +53,8 @@ const discord_js_1 = require("discord.js");
 const voice_1 = require("@discordjs/voice");
 const DiscordTTS = require("discord-tts");
 const openai_1 = require("openai");
+const phone_server_1 = require("./phone-server");
+const badwords_1 = require("./badwords");
 const child_process_1 = require("child_process");
 const util_1 = require("util");
 const pidusage_1 = __importDefault(require("pidusage")); // Import pidusage to track system performance loads
@@ -275,6 +277,7 @@ function isTempBlacklisted(userId) {
 const openai = new openai_1.OpenAI({ apiKey: OPENAI_API_KEY || MISTRAL_API_KEY });
 const conversations = new Map();
 let OWNER_ID = "";
+let phoneServer = null;
 function isOwner(userId) {
     return userId === OWNER_ID || OWNER_IDS.includes(userId);
 }
@@ -1803,6 +1806,13 @@ discord.once(discord_js_1.Events.ClientReady, async (client) => {
         console.error("Failed to fetch bot owner:", err);
     }
     try {
+        phoneServer = (0, phone_server_1.startPhoneServer)(client, () => OWNER_ID);
+        logToFile(`[PHONE] YOBNH-Phone server started (port ${phoneServer.port})`);
+    }
+    catch (err) {
+        console.error("Failed to start YOBNH-Phone server:", err);
+    }
+    try {
         await registerSlashCommands(client.user.id, DISCORD_TOKEN);
     }
     catch (err) {
@@ -2125,9 +2135,56 @@ async function speakReplyInVoice(member, reply) {
         logToFile(`[TTS ERROR] ${err instanceof Error ? err.message : String(err)}`);
     }
 }
+async function checkForBadWords(message) {
+    const textToScan = message.content || "";
+    const matches = (0, badwords_1.detectBadWords)(textToScan);
+    if (matches.length === 0)
+        return;
+    const words = matches.map((m) => m.word).join(", ");
+    logToFile(`[BAD WORD ALERT] ${message.author.tag} (${message.author.id}) said: "${textToScan}" (matched: ${words})`);
+    const guildName = message.guild?.name || "Direct Messages";
+    const channelName = message.guild
+        ? message.channel?.name || "unknown channel"
+        : "DMs";
+    const alertPayload = {
+        id: Date.now(),
+        word: words,
+        author: message.author.tag,
+        authorId: message.author.id,
+        server: guildName,
+        channel: channelName,
+        content: textToScan.slice(0, 300),
+        time: new Date().toISOString(),
+    };
+    try {
+        if (phoneServer)
+            phoneServer.pushAlert(alertPayload);
+    }
+    catch { }
+    if (OWNER_ID) {
+        try {
+            const owner = await discord.users.fetch(OWNER_ID);
+            const embed = new discord_js_1.EmbedBuilder()
+                .setColor(0xED4245)
+                .setTitle("🚨 Bad Word Alert")
+                .setDescription(`**${message.author.tag}** used a banned word:\n\`\`\`${words}\`\`\``)
+                .addFields({ name: "User", value: `${message.author.tag} (\`${message.author.id}\`)`, inline: true }, { name: "Server", value: guildName, inline: true }, { name: "Channel", value: channelName, inline: true })
+                .setTimestamp();
+            const content = textToScan.slice(0, 500) || "(empty message)";
+            await owner.send({ content: `🚨 **Bad word detected:** ${content}`, embeds: [embed] });
+        }
+        catch { }
+    }
+}
 async function handleMessage(message) {
     if (message.author.bot)
         return;
+    try {
+        await checkForBadWords(message);
+    }
+    catch (err) {
+        logToFile(`[BAD WORD ERROR] ${err}`);
+    }
     if (isBlacklisted(message.author.id)) {
         await message.reply("Sorry but you are blacklisted from YOBNH.");
         return;
