@@ -146,6 +146,7 @@ IMPORTANT RULES:
 - NEVER open duckduckgo.com as a URL. For searches, ALWAYS use the search action: {"action":"search","query":"..."}. The open action is for non-DuckDuckGo websites only.
 - If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open or any other actions when searching for images. Just send the single search_images action and nothing else.
 - Do not mention Detg or say "aw shucks".
+- NEVER write "@everyone" or "@here" in your replies, and never mention roles — it pings a lot of people. If you want to address a group, just write the name in plain words instead.
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 
 KNOWN FACTS ABOUT WEBSAKEN:
@@ -419,6 +420,27 @@ function splitMessage(text, maxLength = 2000) {
     if (remaining.length > 0)
         chunks.push(remaining);
     return chunks;
+}
+// Neutralize @everyone / @here / role mentions so bot replies never ping anyone.
+function sanitizeMentions(text) {
+    return String(text)
+        .replace(/@(everyone|here)\b/gi, "@\u200B$1")
+        .replace(/<@[&!]?\d+>/g, (m) => `<\u200B${m.slice(1)}`);
+}
+async function sendChunks(target, text) {
+    const safe = sanitizeMentions(text);
+    const chunks = splitMessage(safe, 2000);
+    for (let i = 0; i < chunks.length; i++) {
+        if (i === 0 && typeof target.editReply === "function") {
+            await target.editReply(chunks[0]);
+        }
+        else if (typeof target.followUp === "function") {
+            await target.followUp(chunks[i]);
+        }
+        else {
+            await target.send(chunks[i]);
+        }
+    }
 }
 let terminalInterface = null;
 function createConsoleInterface() {
@@ -1502,11 +1524,7 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                     addToHistory(channelId, userId, "user", `Browser results:\n${browserData}`);
                     reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
                     addToHistory(channelId, userId, "assistant", reply);
-                    const chunks = splitMessage(reply, 2000);
-                    await interaction.editReply(chunks[0]);
-                    for (let i = 1; i < chunks.length; i++) {
-                        await interaction.followUp(chunks[i]);
-                    }
+                    await sendChunks(interaction, reply);
                 }
                 else if (parsed?.action === "open" && parsed.url) {
                     const cleaned = sanitizeUrl(String(parsed.url));
@@ -1521,11 +1539,7 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                             addToHistory(channelId, userId, "user", `Browser results:\nOpened page: ${page.title}\nURL: ${page.url}\n\n${page.content}`);
                             reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
                             addToHistory(channelId, userId, "assistant", reply);
-                            const chunks = splitMessage(reply, 2000);
-                            await interaction.editReply(chunks[0]);
-                            for (let i = 1; i < chunks.length; i++) {
-                                await interaction.followUp(chunks[i]);
-                            }
+                            await sendChunks(interaction, reply);
                         }
                         catch (err) {
                             const msg = err instanceof Error ? err.message : String(err);
@@ -1535,11 +1549,7 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 }
                 else {
                     addToHistory(channelId, userId, "assistant", reply);
-                    const chunks = splitMessage(reply, 2000);
-                    await interaction.editReply(chunks[0]);
-                    for (let i = 1; i < chunks.length; i++) {
-                        await interaction.followUp(chunks[i]);
-                    }
+                    await sendChunks(interaction, reply);
                 }
             }
             catch (err) {
@@ -2530,19 +2540,13 @@ async function handleMessage(message) {
                 reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
             }
             addToHistory(channelId, userId, "assistant", reply);
-            const chunks = splitMessage(reply, 2000);
-            for (const chunk of chunks) {
-                await channel.send(chunk);
-            }
+            await sendChunks(channel, reply);
             void speakReplyInVoice(message.member, reply);
         }
         return;
     }
     addToHistory(channelId, userId, "assistant", reply);
-    const chunks = splitMessage(reply, 2000);
-    for (const chunk of chunks) {
-        await channel.send(chunk);
-    }
+    await sendChunks(channel, reply);
     void speakReplyInVoice(message.member, reply);
 }
 discord.on(discord_js_1.Events.MessageCreate, async (message) => {
