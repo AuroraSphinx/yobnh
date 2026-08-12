@@ -149,10 +149,17 @@ IMPORTANT RULES:
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 
 KNOWN FACTS ABOUT WEBSAKEN:
-- Websaken is an ASYMMETRIC survival-horror game (often called ASYM) coming to WEBSIM.
-- It is heavily inspired by FORSAKEN (the Roblox game), sharing a similar 1-vs-many killer vs survivors style.
-- Websaken is still in development and has a LOT of content planned: many skins, killers, and survivors are coming up soon.
+- Websaken is a 2D styled ASYMMETRICAL game (often called ASYM) coming to WEBSIM, heavily inspired by FORSAKEN (the Roblox game), sharing a similar killer vs survivors style.
+- It features 6 unique characters: 2 killers and 4 survivors. Websaken is still in development, with many more skins, killers, and survivors coming up soon.
 - If anyone asks you about Websaken, treat this as something you already know, so answer confidently without needing to search.
+
+WEBSAKEN CHARACTERS:
+- Syntax Error (KILLER): A gray box computer with 2 legs and saws as their arms.
+- Coldlan (KILLER): A blue furry character with inverted eyes, and a Coldlandian flag on their face (blue field, 3 horizontal red stripes with a large white star in the middle). They can "infect" survivors, turning them into furries that assist him in game.
+- Sackboy (SURVIVOR): A beige stickman with inverted eyes and a white crown, carrying a camera that can blind killers.
+- Coldlandia Ball (SURVIVOR): A countryball wearing the Coldlandian flag (blue field, 3 horizontal red stripes with a large white star in the middle), equipped with a shotgun that can stun killers.
+- Mr Void (SURVIVOR): A triangle with a void texture, wearing a purple top hat and holding fries. Void can use soda to heal teammates.
+- Comet (SURVIVOR): A black and white blobish thing with a star as its eye. It's fast, but at the time of writing he has NOT been added to the game yet.
 `;
 // --- Language / Speaking Style ---
 const LANGUAGE_FILE = path.join(process.cwd(), "language.json");
