@@ -77,6 +77,7 @@ let RUNNING_MODE: "gpu" | "ram" = "gpu";
 let MAX_HISTORY = 20;
 let RESPONSE_MODEL = "";
 let isThrottled = false; // Lock flag to prevent the bot from running tasks during high resource usage
+let isBusy = false; // Lock flag: true while the bot is generating a reply for someone else
 
 if (PLAYWRIGHT_BROWSERS_PATH) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = PLAYWRIGHT_BROWSERS_PATH;
@@ -2527,8 +2528,15 @@ async function handleMessage(message: Message): Promise<void> {
     return;
   }
 
+  if (isBusy) {
+    await message.reply("bro cant you wait someone is already talking with me take some seconds and respone again!");
+    return;
+  }
+  isBusy = true;
+
   logToFile(`[MSG] ${message.author.tag} (${message.author.id}): ${userText}`);
 
+  try {
   if (typeof channel.sendTyping === "function") await channel.sendTyping();
   const channelId = message.channel.id;
   const userId = message.author.id;
@@ -2588,6 +2596,9 @@ async function handleMessage(message: Message): Promise<void> {
 
   await sendChunks(channel, reply);
   void speakReplyInVoice(message.member, reply);
+  } finally {
+    isBusy = false;
+  }
 }
 
 discord.on(Events.MessageCreate, async (message) => {

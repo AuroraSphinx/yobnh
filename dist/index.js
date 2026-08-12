@@ -112,6 +112,7 @@ let RUNNING_MODE = "gpu";
 let MAX_HISTORY = 20;
 let RESPONSE_MODEL = "";
 let isThrottled = false; // Lock flag to prevent the bot from running tasks during high resource usage
+let isBusy = false; // Lock flag: true while the bot is generating a reply for someone else
 if (PLAYWRIGHT_BROWSERS_PATH) {
     process.env.PLAYWRIGHT_BROWSERS_PATH = PLAYWRIGHT_BROWSERS_PATH;
 }
@@ -2489,65 +2490,75 @@ async function handleMessage(message) {
         }
         return;
     }
-    logToFile(`[MSG] ${message.author.tag} (${message.author.id}): ${userText}`);
-    if (typeof channel.sendTyping === "function")
-        await channel.sendTyping();
-    const channelId = message.channel.id;
-    const userId = message.author.id;
-    const imageParts = await buildVisionContentParts(message);
-    if (imageParts.length > 0) {
-        addToHistory(channelId, userId, "user", [
-            { type: "text", text: userText || "Describe this image." },
-            ...imageParts,
-        ]);
-        if (userText) {
-            await channel.send(`👁️ I see **${imageParts.length}** attached image(s), reading them now...`);
-        }
-    }
-    else {
-        addToHistory(channelId, userId, "user", userText);
-    }
-    let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 256, 0.4);
-    logToFile(`[AI REPLY] ${reply}`);
-    let parsed = extractJsonFromText(reply);
-    if (parsed) {
-        logToFile(`[PARSED ACTION] ${JSON.stringify(parsed)}`);
-        addToHistory(channelId, userId, "assistant", reply);
-        const items = (Array.isArray(parsed) ? parsed : [parsed]).filter((item) => item && typeof item === "object");
-        let browserData = null;
-        let needsFollowUp = false;
-        for (const item of items) {
-            const action = item?.action;
-            if (action === "search" && item.query) {
-                needsFollowUp = true;
-                const data = await performSearchAction(item.query, channel);
-                if (data)
-                    browserData = data;
-            }
-            else if (action === "open" && item.url) {
-                needsFollowUp = true;
-                const data = await performOpenAction(item, channel, userText);
-                if (data)
-                    browserData = data;
-            }
-            else {
-                await executeSingleAction(item, channel, userId, channelId);
-            }
-        }
-        if (needsFollowUp) {
-            if (browserData) {
-                addToHistory(channelId, userId, "user", `Browser results:\n${browserData}\n\nPlease answer the original question using this information.`);
-                reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
-            }
-            addToHistory(channelId, userId, "assistant", reply);
-            await sendChunks(channel, reply);
-            void speakReplyInVoice(message.member, reply);
-        }
+    if (isBusy) {
+        await message.reply("bro cant you wait someone is already talking with me take some seconds and respone again!");
         return;
     }
-    addToHistory(channelId, userId, "assistant", reply);
-    await sendChunks(channel, reply);
-    void speakReplyInVoice(message.member, reply);
+    isBusy = true;
+    logToFile(`[MSG] ${message.author.tag} (${message.author.id}): ${userText}`);
+    try {
+        if (typeof channel.sendTyping === "function")
+            await channel.sendTyping();
+        const channelId = message.channel.id;
+        const userId = message.author.id;
+        const imageParts = await buildVisionContentParts(message);
+        if (imageParts.length > 0) {
+            addToHistory(channelId, userId, "user", [
+                { type: "text", text: userText || "Describe this image." },
+                ...imageParts,
+            ]);
+            if (userText) {
+                await channel.send(`👁️ I see **${imageParts.length}** attached image(s), reading them now...`);
+            }
+        }
+        else {
+            addToHistory(channelId, userId, "user", userText);
+        }
+        let reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 256, 0.4);
+        logToFile(`[AI REPLY] ${reply}`);
+        let parsed = extractJsonFromText(reply);
+        if (parsed) {
+            logToFile(`[PARSED ACTION] ${JSON.stringify(parsed)}`);
+            addToHistory(channelId, userId, "assistant", reply);
+            const items = (Array.isArray(parsed) ? parsed : [parsed]).filter((item) => item && typeof item === "object");
+            let browserData = null;
+            let needsFollowUp = false;
+            for (const item of items) {
+                const action = item?.action;
+                if (action === "search" && item.query) {
+                    needsFollowUp = true;
+                    const data = await performSearchAction(item.query, channel);
+                    if (data)
+                        browserData = data;
+                }
+                else if (action === "open" && item.url) {
+                    needsFollowUp = true;
+                    const data = await performOpenAction(item, channel, userText);
+                    if (data)
+                        browserData = data;
+                }
+                else {
+                    await executeSingleAction(item, channel, userId, channelId);
+                }
+            }
+            if (needsFollowUp) {
+                if (browserData) {
+                    addToHistory(channelId, userId, "user", `Browser results:\n${browserData}\n\nPlease answer the original question using this information.`);
+                    reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
+                }
+                addToHistory(channelId, userId, "assistant", reply);
+                await sendChunks(channel, reply);
+                void speakReplyInVoice(message.member, reply);
+            }
+            return;
+        }
+        addToHistory(channelId, userId, "assistant", reply);
+        await sendChunks(channel, reply);
+        void speakReplyInVoice(message.member, reply);
+    }
+    finally {
+        isBusy = false;
+    }
 }
 discord.on(discord_js_1.Events.MessageCreate, async (message) => {
     try {
