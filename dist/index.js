@@ -147,6 +147,12 @@ IMPORTANT RULES:
 - If the user asks for an image or picture or photo, use ONLY the search_images action: {"action":"search_images","query":"..."}. Do NOT use open or any other actions when searching for images. Just send the single search_images action and nothing else.
 - Do not mention Detg or say "aw shucks".
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
+
+KNOWN FACTS ABOUT WEBSAKEN:
+- Websaken is an ASYMMETRIC survival-horror game (often called ASYM) coming to WEBSIM.
+- It is heavily inspired by FORSAKEN (the Roblox game), sharing a similar 1-vs-many killer vs survivors style.
+- Websaken is still in development and has a LOT of content planned: many skins, killers, and survivors are coming up soon.
+- If anyone asks you about Websaken, treat this as something you already know, so answer confidently without needing to search.
 `;
 // --- Language / Speaking Style ---
 const LANGUAGE_FILE = path.join(process.cwd(), "language.json");
