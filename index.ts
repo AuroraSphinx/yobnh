@@ -16,6 +16,7 @@ import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandB
 import { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState, AudioPlayer } from "@discordjs/voice";
 const DiscordTTS = require("discord-tts");
 const ytdlp = require("youtube-dl-exec");
+const prism = require("prism-media");
 import * as ytSearch from "youtube-search-api";
 import { OpenAI } from "openai";
 import { startPhoneServer, PhoneServerHandle } from "./phone-server";
@@ -1841,11 +1842,11 @@ discord.on(Events.InteractionCreate, (interaction) => {
       const state = getMusicState(interaction.guildId);
       const wasEmpty = state.queue.length === 0 && !state.current;
       enqueueTrack(interaction.guildId, track, interaction.channel);
-      await interaction.editReply(
-        wasEmpty
-          ? `🎵 **Playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""}`
-          : `➕ **Queued:** ${track.title}${track.duration ? ` (${track.duration})` : ""} (#${state.queue.length})`
+      const playReply = buildMusicSection(
+        wasEmpty ? `# 🎵 Playing` : `# ➕ Queued (#${state.queue.length})`,
+        track
       );
+      await interaction.editReply({ components: [playReply], flags: MessageFlags.IsComponentsV2 });
     });
     return;
   }
@@ -2303,6 +2304,7 @@ interface MusicTrack {
   title: string;
   url: string;
   duration: string;
+  thumbnail: string;
   requestedBy: string;
 }
 
@@ -2339,10 +2341,14 @@ async function searchYoutube(query: string): Promise<MusicTrack | null> {
     if (!videoId) return null;
     const rawTitle = item.title?.short ?? item.title ?? "Unknown title";
     const duration = item.length?.simpleText ?? "";
+    const thumbnail = Array.isArray(item.thumbnail?.thumbnails) && item.thumbnail.thumbnails.length
+      ? item.thumbnail.thumbnails[item.thumbnail.thumbnails.length - 1].url
+      : `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
     return {
       title: String(rawTitle),
       url: `https://www.youtube.com/watch?v=${videoId}`,
       duration: String(duration),
+      thumbnail: String(thumbnail),
       requestedBy: "",
     };
   } catch (err) {
@@ -2355,6 +2361,18 @@ async function resolveTrack(input: string): Promise<MusicTrack | null> {
   const videoId = extractVideoId(input);
   if (videoId) {
     const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    try {
+      const details = await ytSearch.GetVideoDetails(videoId) as any;
+      if (details?.title) {
+        const thumb = Array.isArray(details.thumbnail?.thumbnails) && details.thumbnail.thumbnails.length
+          ? details.thumbnail.thumbnails[details.thumbnail.thumbnails.length - 1].url
+          : thumbnail;
+        return { title: String(details.title), url, duration: "", thumbnail: String(thumb), requestedBy: "" };
+      }
+    } catch (err) {
+      logToFile(`[MUSIC DETAILS ERROR] ${err}`);
+    }
     const info = await new Promise<{ title: string; duration: string } | null>((resolve) => {
       try {
         const child = ytdlp.exec(url, {
@@ -2380,8 +2398,8 @@ async function resolveTrack(input: string): Promise<MusicTrack | null> {
         resolve(null);
       }
     });
-    if (info) return { ...info, url, requestedBy: "" };
-    return { title: input, url, duration: "", requestedBy: "" };
+    if (info) return { ...info, url, thumbnail, requestedBy: "" };
+    return { title: input, url, duration: "", thumbnail, requestedBy: "" };
   }
   return searchYoutube(input);
 }
@@ -2404,6 +2422,19 @@ async function ensureMusicConnection(guild: any, member: any): Promise<any | nul
     return null;
   }
   return connection;
+}
+
+function buildMusicSection(heading: string, track: MusicTrack, extraLine?: string): SectionBuilder {
+  const section = new SectionBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      `${heading}\n\n` +
+      `**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}` +
+      (extraLine ? `\n${extraLine}` : "") +
+      `\n🔗 ${track.url}`
+    )
+  );
+  if (track.thumbnail) section.setThumbnailAccessory(new ThumbnailBuilder().setURL(track.thumbnail));
+  return section;
 }
 
 function playNextTrack(guildId: string): void {
@@ -2455,9 +2486,22 @@ function playNextTrack(guildId: string): void {
       const line = chunk.toString().trim();
       if (line.includes("ERROR")) logToFile(`[MUSIC] yt-dlp: ${line}`);
     });
-    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+    const transcoder = new prism.FFmpeg({
+      args: [
+        "-analyzeduration", "0",
+        "-loglevel", "0",
+        "-f", "s16le",
+        "-ar", "48000",
+        "-ac", "2",
+      ],
+    });
+    stream.pipe(transcoder);
+    transcoder.on("error", (err: any) => {
+      logToFile(`[MUSIC FFMPEG ERROR] ${err?.message || err}`);
+    });
+    const resource = createAudioResource(transcoder, { inputType: StreamType.Raw });
     player.play(resource);
-    logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId}`);
+    logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
   } catch (err) {
     logToFile(`[MUSIC ERROR] Failed to start "${track.title}": ${err}`);
     playNextTrack(guildId);
@@ -2466,19 +2510,13 @@ function playNextTrack(guildId: string): void {
 
   if (state.textChannel) {
     try {
-      const nowPlayingSection = new SectionBuilder().addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(
-          `# 🎵 Now Playing\n\n` +
-          `**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}\n` +
-          `**Requested by:** ${track.requestedBy}\n\n` +
-          `🔗 ${track.url}`
-        )
+      const nowPlayingSection = buildMusicSection(
+        `# 🎵 Now Playing`,
+        track,
+        `**Requested by:** ${track.requestedBy}`
       );
-      nowPlayingSection.setThumbnailAccessory(new ThumbnailBuilder().setURL("attachment://playing.gif"));
-      const playingGifPath = path.join(process.cwd(), "images", "playing.gif");
       void state.textChannel.send({
         components: [nowPlayingSection],
-        files: fs.existsSync(playingGifPath) ? [new AttachmentBuilder(playingGifPath, { name: "playing.gif" })] : [],
         flags: MessageFlags.IsComponentsV2,
       });
     } catch {}
@@ -2841,11 +2879,11 @@ async function handleMessage(message: Message): Promise<void> {
     const state = getMusicState(message.guild!.id);
     const wasEmpty = state.queue.length === 0 && !state.current;
     enqueueTrack(message.guild!.id, track, channel);
-    await channel.send(
-      wasEmpty
-        ? `🎵 **Playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""}`
-        : `➕ **Queued:** ${track.title}${track.duration ? ` (${track.duration})` : ""} (#${state.queue.length})`
+    const playReply = buildMusicSection(
+      wasEmpty ? `# 🎵 Playing` : `# ➕ Queued (#${state.queue.length})`,
+      track
     );
+    await channel.send({ components: [playReply], flags: MessageFlags.IsComponentsV2 });
     return;
   }
 

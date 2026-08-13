@@ -53,6 +53,7 @@ const discord_js_1 = require("discord.js");
 const voice_1 = require("@discordjs/voice");
 const DiscordTTS = require("discord-tts");
 const ytdlp = require("youtube-dl-exec");
+const prism = require("prism-media");
 const ytSearch = __importStar(require("youtube-search-api"));
 const openai_1 = require("openai");
 const phone_server_1 = require("./phone-server");
@@ -1829,9 +1830,8 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
             const state = getMusicState(interaction.guildId);
             const wasEmpty = state.queue.length === 0 && !state.current;
             enqueueTrack(interaction.guildId, track, interaction.channel);
-            await interaction.editReply(wasEmpty
-                ? `🎵 **Playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""}`
-                : `➕ **Queued:** ${track.title}${track.duration ? ` (${track.duration})` : ""} (#${state.queue.length})`);
+            const playReply = buildMusicSection(wasEmpty ? `# 🎵 Playing` : `# ➕ Queued (#${state.queue.length})`, track);
+            await interaction.editReply({ components: [playReply], flags: discord_js_1.MessageFlags.IsComponentsV2 });
         });
         return;
     }
@@ -2295,10 +2295,14 @@ async function searchYoutube(query) {
             return null;
         const rawTitle = item.title?.short ?? item.title ?? "Unknown title";
         const duration = item.length?.simpleText ?? "";
+        const thumbnail = Array.isArray(item.thumbnail?.thumbnails) && item.thumbnail.thumbnails.length
+            ? item.thumbnail.thumbnails[item.thumbnail.thumbnails.length - 1].url
+            : `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
         return {
             title: String(rawTitle),
             url: `https://www.youtube.com/watch?v=${videoId}`,
             duration: String(duration),
+            thumbnail: String(thumbnail),
             requestedBy: "",
         };
     }
@@ -2311,6 +2315,19 @@ async function resolveTrack(input) {
     const videoId = extractVideoId(input);
     if (videoId) {
         const url = `https://www.youtube.com/watch?v=${videoId}`;
+        const thumbnail = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+        try {
+            const details = await ytSearch.GetVideoDetails(videoId);
+            if (details?.title) {
+                const thumb = Array.isArray(details.thumbnail?.thumbnails) && details.thumbnail.thumbnails.length
+                    ? details.thumbnail.thumbnails[details.thumbnail.thumbnails.length - 1].url
+                    : thumbnail;
+                return { title: String(details.title), url, duration: "", thumbnail: String(thumb), requestedBy: "" };
+            }
+        }
+        catch (err) {
+            logToFile(`[MUSIC DETAILS ERROR] ${err}`);
+        }
         const info = await new Promise((resolve) => {
             try {
                 const child = ytdlp.exec(url, {
@@ -2338,8 +2355,8 @@ async function resolveTrack(input) {
             }
         });
         if (info)
-            return { ...info, url, requestedBy: "" };
-        return { title: input, url, duration: "", requestedBy: "" };
+            return { ...info, url, thumbnail, requestedBy: "" };
+        return { title: input, url, duration: "", thumbnail, requestedBy: "" };
     }
     return searchYoutube(input);
 }
@@ -2363,6 +2380,15 @@ async function ensureMusicConnection(guild, member) {
         return null;
     }
     return connection;
+}
+function buildMusicSection(heading, track, extraLine) {
+    const section = new discord_js_1.SectionBuilder().addTextDisplayComponents(new discord_js_1.TextDisplayBuilder().setContent(`${heading}\n\n` +
+        `**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}` +
+        (extraLine ? `\n${extraLine}` : "") +
+        `\n🔗 ${track.url}`));
+    if (track.thumbnail)
+        section.setThumbnailAccessory(new discord_js_1.ThumbnailBuilder().setURL(track.thumbnail));
+    return section;
 }
 function playNextTrack(guildId) {
     const state = getMusicState(guildId);
@@ -2412,9 +2438,22 @@ function playNextTrack(guildId) {
             if (line.includes("ERROR"))
                 logToFile(`[MUSIC] yt-dlp: ${line}`);
         });
-        const resource = (0, voice_1.createAudioResource)(stream, { inputType: voice_1.StreamType.Arbitrary });
+        const transcoder = new prism.FFmpeg({
+            args: [
+                "-analyzeduration", "0",
+                "-loglevel", "0",
+                "-f", "s16le",
+                "-ar", "48000",
+                "-ac", "2",
+            ],
+        });
+        stream.pipe(transcoder);
+        transcoder.on("error", (err) => {
+            logToFile(`[MUSIC FFMPEG ERROR] ${err?.message || err}`);
+        });
+        const resource = (0, voice_1.createAudioResource)(transcoder, { inputType: voice_1.StreamType.Raw });
         player.play(resource);
-        logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId}`);
+        logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
     }
     catch (err) {
         logToFile(`[MUSIC ERROR] Failed to start "${track.title}": ${err}`);
@@ -2423,15 +2462,9 @@ function playNextTrack(guildId) {
     }
     if (state.textChannel) {
         try {
-            const nowPlayingSection = new discord_js_1.SectionBuilder().addTextDisplayComponents(new discord_js_1.TextDisplayBuilder().setContent(`# 🎵 Now Playing\n\n` +
-                `**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}\n` +
-                `**Requested by:** ${track.requestedBy}\n\n` +
-                `🔗 ${track.url}`));
-            nowPlayingSection.setThumbnailAccessory(new discord_js_1.ThumbnailBuilder().setURL("attachment://playing.gif"));
-            const playingGifPath = path.join(process.cwd(), "images", "playing.gif");
+            const nowPlayingSection = buildMusicSection(`# 🎵 Now Playing`, track, `**Requested by:** ${track.requestedBy}`);
             void state.textChannel.send({
                 components: [nowPlayingSection],
-                files: fs.existsSync(playingGifPath) ? [new discord_js_1.AttachmentBuilder(playingGifPath, { name: "playing.gif" })] : [],
                 flags: discord_js_1.MessageFlags.IsComponentsV2,
             });
         }
@@ -2783,9 +2816,8 @@ async function handleMessage(message) {
         const state = getMusicState(message.guild.id);
         const wasEmpty = state.queue.length === 0 && !state.current;
         enqueueTrack(message.guild.id, track, channel);
-        await channel.send(wasEmpty
-            ? `🎵 **Playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""}`
-            : `➕ **Queued:** ${track.title}${track.duration ? ` (${track.duration})` : ""} (#${state.queue.length})`);
+        const playReply = buildMusicSection(wasEmpty ? `# 🎵 Playing` : `# ➕ Queued (#${state.queue.length})`, track);
+        await channel.send({ components: [playReply], flags: discord_js_1.MessageFlags.IsComponentsV2 });
         return;
     }
     if (prefixCommand === "skip") {
