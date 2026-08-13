@@ -2423,7 +2423,17 @@ function playNextTrack(guildId) {
     }
     if (state.textChannel) {
         try {
-            void state.textChannel.send(`🎵 **Now playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""} — requested by **${track.requestedBy}**`);
+            const nowPlayingSection = new discord_js_1.SectionBuilder().addTextDisplayComponents(new discord_js_1.TextDisplayBuilder().setContent(`# 🎵 Now Playing\n\n` +
+                `**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}\n` +
+                `**Requested by:** ${track.requestedBy}\n\n` +
+                `🔗 ${track.url}`));
+            nowPlayingSection.setThumbnailAccessory(new discord_js_1.ThumbnailBuilder().setURL("attachment://playing.gif"));
+            const playingGifPath = path.join(process.cwd(), "images", "playing.gif");
+            void state.textChannel.send({
+                components: [nowPlayingSection],
+                files: fs.existsSync(playingGifPath) ? [new discord_js_1.AttachmentBuilder(playingGifPath, { name: "playing.gif" })] : [],
+                flags: discord_js_1.MessageFlags.IsComponentsV2,
+            });
         }
         catch { }
     }

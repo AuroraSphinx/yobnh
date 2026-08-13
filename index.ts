@@ -2466,7 +2466,21 @@ function playNextTrack(guildId: string): void {
 
   if (state.textChannel) {
     try {
-      void state.textChannel.send(`🎵 **Now playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""} — requested by **${track.requestedBy}**`);
+      const nowPlayingSection = new SectionBuilder().addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `# 🎵 Now Playing\n\n` +
+          `**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}\n` +
+          `**Requested by:** ${track.requestedBy}\n\n` +
+          `🔗 ${track.url}`
+        )
+      );
+      nowPlayingSection.setThumbnailAccessory(new ThumbnailBuilder().setURL("attachment://playing.gif"));
+      const playingGifPath = path.join(process.cwd(), "images", "playing.gif");
+      void state.textChannel.send({
+        components: [nowPlayingSection],
+        files: fs.existsSync(playingGifPath) ? [new AttachmentBuilder(playingGifPath, { name: "playing.gif" })] : [],
+        flags: MessageFlags.IsComponentsV2,
+      });
     } catch {}
   }
 
