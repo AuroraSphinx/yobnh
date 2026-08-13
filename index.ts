@@ -13,8 +13,10 @@ import * as path from "path";
 import * as os from "os";
 import readline from "readline";
 import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, Team, ActivityType, PresenceUpdateStatus, ChannelType, SectionBuilder, TextDisplayBuilder, SeparatorBuilder, ThumbnailBuilder, ContainerBuilder, MessageFlags } from "discord.js";
-import { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState } from "@discordjs/voice";
+import { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState, AudioPlayer } from "@discordjs/voice";
 const DiscordTTS = require("discord-tts");
+const ytdlp = require("youtube-dl-exec");
+import * as ytSearch from "youtube-search-api";
 import { OpenAI } from "openai";
 import { startPhoneServer, PhoneServerHandle } from "./phone-server";
 import { detectBadWords, BadWordMatch } from "./badwords";
@@ -119,18 +121,8 @@ IMPORTANT RULES:
 - NEVER write "@everyone" or "@here" in your replies, and never mention roles — it pings a lot of people. If you want to address a group, just write the name in plain words instead.
 - Do not produce NSFW content or search explicit sites like Rule 34 or Pornhub.
 
-KNOWN FACTS ABOUT WEBSAKEN:
-- Websaken is a 2D styled ASYMMETRICAL game (often called ASYM) coming to WEBSIM, heavily inspired by FORSAKEN (the Roblox game), sharing a similar killer vs survivors style.
-- It features 6 unique characters: 2 killers and 4 survivors. Websaken is still in development, with many more skins, killers, and survivors coming up soon.
-- If anyone asks you about Websaken, treat this as something you already know, so answer confidently without needing to search.
-
-WEBSAKEN CHARACTERS:
-- Syntax Error (KILLER): A gray box computer with 2 legs and saws as their arms.
-- Coldlan (KILLER): A blue furry character with inverted eyes, and a Coldlandian flag on their face (blue field, 3 horizontal red stripes with a large white star in the middle). They can "infect" survivors, turning them into furries that assist him in game.
-- Sackboy (SURVIVOR): A beige stickman with inverted eyes and a white crown, carrying a camera that can blind killers.
-- Coldlandia Ball (SURVIVOR): A countryball wearing the Coldlandian flag (blue field, 3 horizontal red stripes with a large white star in the middle), equipped with a shotgun that can stun killers.
-- Mr Void (SURVIVOR): A triangle with a void texture, wearing a purple top hat and holding fries. Void can use soda to heal teammates.
-- Comet (SURVIVOR): A black and white blobish thing with a star as its eye. It's fast, but at the time of writing he has NOT been added to the game yet.
+TOPIC RULES:
+- Never force a topic into the conversation. Do NOT mention Websaken unless the user brings it up first, and never steer conversations toward it. Chat about whatever the user actually wants to talk about.
 `;
 
 // --- Language / Speaking Style ---
@@ -1069,6 +1061,39 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
       .setName("leave")
       .setDescription("Make YOBNH leave the voice channel")
       .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("play")
+      .setDescription("Play a song in the voice channel (search or YouTube link)")
+      .addStringOption(option =>
+        option.setName("query").setDescription("Song name or YouTube link").setRequired(true)
+      )
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("skip")
+      .setDescription("Skip the currently playing song")
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("pause")
+      .setDescription("Pause the music")
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("resume")
+      .setDescription("Resume the music")
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("stop")
+      .setDescription("Stop the music and leave the voice channel")
+      .setDMPermission(false)
+      .toJSON(),
+    new SlashCommandBuilder()
+      .setName("queue")
+      .setDescription("Show the current music queue")
+      .setDMPermission(false)
       .toJSON()
   ];
 
@@ -1077,7 +1102,7 @@ async function registerSlashCommands(clientId: string, token: string): Promise<v
   try {
     console.log("Synchronizing slash command arrays...");
     await rest.put(Routes.applicationCommands(clientId), { body: guildCommands });
-    console.log("✅ Slash commands registered globally (app commands): /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora, /join, /leave");
+    console.log("✅ Slash commands registered globally (app commands): /send-dm, /health-check, /ask, /yobnh-member, /update-channel, /clearmemory, /send-file, /notice-aurora, /join, /leave, /play, /skip, /pause, /resume, /stop, /queue");
   } catch (error) {
     console.error("Failed to register slash commands:", error);
   }
@@ -1787,9 +1812,135 @@ discord.on(Events.InteractionCreate, (interaction) => {
         await interaction.reply({ content: "❌ I'm not in a voice channel in this server.", ephemeral: true });
         return;
       }
-      connection.destroy();
+      stopMusic(interaction.guildId);
       logToFile(`[VOICE] ${interaction.user.tag} (${interaction.user.id}) made YOBNH leave voice`);
       await interaction.reply({ content: "👋 Left the voice channel!" });
+    });
+    return;
+  }
+
+  if (interaction.commandName === "play") {
+    setImmediate(async () => {
+      if (!interaction.inCachedGuild()) {
+        await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+        return;
+      }
+      const query = interaction.options.getString("query", true);
+      const connection = await ensureMusicConnection(interaction.guild, interaction.member);
+      if (!connection) {
+        await interaction.reply({ content: "❌ You need to be in a voice channel!", ephemeral: true });
+        return;
+      }
+      await interaction.reply(`🔎 **Searching:** \`${query}\`...`);
+      const track = await resolveTrack(query);
+      if (!track) {
+        await interaction.editReply("❌ Could not find that song.");
+        return;
+      }
+      track.requestedBy = interaction.user.username;
+      const state = getMusicState(interaction.guildId);
+      const wasEmpty = state.queue.length === 0 && !state.current;
+      enqueueTrack(interaction.guildId, track, interaction.channel);
+      await interaction.editReply(
+        wasEmpty
+          ? `🎵 **Playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""}`
+          : `➕ **Queued:** ${track.title}${track.duration ? ` (${track.duration})` : ""} (#${state.queue.length})`
+      );
+    });
+    return;
+  }
+
+  if (interaction.commandName === "skip") {
+    setImmediate(async () => {
+      if (!interaction.inCachedGuild()) {
+        await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+        return;
+      }
+      const state = getMusicState(interaction.guildId);
+      if (!state.current && state.queue.length === 0) {
+        await interaction.reply({ content: "❌ Nothing is playing right now.", ephemeral: true });
+        return;
+      }
+      const current = state.current;
+      state.player?.stop();
+      await interaction.reply({ content: `⏭️ **Skipped:** ${current ? current.title : "the current song"}` });
+    });
+    return;
+  }
+
+  if (interaction.commandName === "pause") {
+    setImmediate(async () => {
+      if (!interaction.inCachedGuild()) {
+        await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+        return;
+      }
+      const state = getMusicState(interaction.guildId);
+      if (!state.player || state.player.state.status !== AudioPlayerStatus.Playing) {
+        await interaction.reply({ content: "❌ Nothing is playing right now.", ephemeral: true });
+        return;
+      }
+      state.player.pause();
+      await interaction.reply({ content: "⏸️ **Paused.** Use `/resume` to continue." });
+    });
+    return;
+  }
+
+  if (interaction.commandName === "resume") {
+    setImmediate(async () => {
+      if (!interaction.inCachedGuild()) {
+        await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+        return;
+      }
+      const state = getMusicState(interaction.guildId);
+      if (!state.player || state.player.state.status !== AudioPlayerStatus.Paused) {
+        await interaction.reply({ content: "❌ Nothing is paused right now.", ephemeral: true });
+        return;
+      }
+      state.player.unpause();
+      await interaction.reply({ content: "▶️ **Resumed!**" });
+    });
+    return;
+  }
+
+  if (interaction.commandName === "stop") {
+    setImmediate(async () => {
+      if (!interaction.inCachedGuild()) {
+        await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+        return;
+      }
+      const connection = getVoiceConnection(interaction.guildId);
+      if (!connection) {
+        await interaction.reply({ content: "❌ I'm not in a voice channel in this server.", ephemeral: true });
+        return;
+      }
+      stopMusic(interaction.guildId);
+      logToFile(`[VOICE] ${interaction.user.tag} (${interaction.user.id}) stopped the music`);
+      await interaction.reply({ content: "🛑 **Stopped** the music and left the voice channel." });
+    });
+    return;
+  }
+
+  if (interaction.commandName === "queue") {
+    setImmediate(async () => {
+      if (!interaction.inCachedGuild()) {
+        await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+        return;
+      }
+      const state = getMusicState(interaction.guildId);
+      const lines: string[] = [];
+      if (state.current) {
+        lines.push(`🎵 **Now playing:** ${state.current.title}${state.current.duration ? ` (${state.current.duration})` : ""} — requested by **${state.current.requestedBy}**`);
+      }
+      if (state.queue.length === 0) {
+        lines.push("The queue is empty.");
+      } else {
+        lines.push(`**Up next (${state.queue.length}):**`);
+        state.queue.slice(0, 10).forEach((t, i) => {
+          lines.push(`${i + 1}. ${t.title}${t.duration ? ` (${t.duration})` : ""} — requested by **${t.requestedBy}**`);
+        });
+        if (state.queue.length > 10) lines.push(`...and ${state.queue.length - 10} more`);
+      }
+      await interaction.reply({ content: lines.join("\n") });
     });
     return;
   }
@@ -2098,6 +2249,7 @@ async function speakReplyInVoice(member: any, reply: string): Promise<void> {
     if (!member?.voice?.channel) return;
     const guild = member.guild;
     if (!guild) return;
+    if (getMusicState(guild.id).current) return;
     const vc = member.voice.channel;
 
     let connection = getVoiceConnection(guild.id);
@@ -2144,6 +2296,232 @@ async function speakReplyInVoice(member: any, reply: string): Promise<void> {
   } catch (err) {
     logToFile(`[TTS ERROR] ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+// --- Music System (YouTube playback in voice channels) ---
+interface MusicTrack {
+  title: string;
+  url: string;
+  duration: string;
+  requestedBy: string;
+}
+
+interface GuildMusic {
+  queue: MusicTrack[];
+  current: MusicTrack | null;
+  player: AudioPlayer | null;
+  textChannel: any;
+  idleTimer: NodeJS.Timeout | null;
+}
+
+const musicState = new Map<string, GuildMusic>();
+
+function getMusicState(guildId: string): GuildMusic {
+  let state = musicState.get(guildId);
+  if (!state) {
+    state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null };
+    musicState.set(guildId, state);
+  }
+  return state;
+}
+
+function extractVideoId(input: string): string | null {
+  const match = input.trim().match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/);
+  return match ? match[1] : null;
+}
+
+async function searchYoutube(query: string): Promise<MusicTrack | null> {
+  try {
+    const res = await ytSearch.GetListByKeyword(query, 1 as any) as any;
+    const item = res?.items?.[0];
+    if (!item || item.type !== "video") return null;
+    const videoId = typeof item.id === "string" ? item.id : item.id?.videoId;
+    if (!videoId) return null;
+    const rawTitle = item.title?.short ?? item.title ?? "Unknown title";
+    const duration = item.length?.simpleText ?? "";
+    return {
+      title: String(rawTitle),
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+      duration: String(duration),
+      requestedBy: "",
+    };
+  } catch (err) {
+    logToFile(`[MUSIC SEARCH ERROR] ${err}`);
+    return null;
+  }
+}
+
+async function resolveTrack(input: string): Promise<MusicTrack | null> {
+  const videoId = extractVideoId(input);
+  if (videoId) {
+    const url = `https://www.youtube.com/watch?v=${videoId}`;
+    const info = await new Promise<{ title: string; duration: string } | null>((resolve) => {
+      try {
+        const child = ytdlp.exec(url, {
+          noPlaylist: true,
+          noWarnings: true,
+          quiet: true,
+          print: "%(title)s,,,%(duration_string)s",
+        }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+        child.catch?.(() => {});
+        let out = "";
+        child.stdout?.on("data", (chunk: Buffer) => { out += chunk.toString(); });
+        child.stderr?.on("data", () => {});
+        const timer = setTimeout(() => resolve(null), 20_000);
+        const finish = () => {
+          clearTimeout(timer);
+          const parts = out.trim().split(",,,");
+          resolve(parts[0] ? { title: parts[0], duration: parts[1] || "" } : null);
+        };
+        child.once?.("close", finish);
+        child.once?.("error", () => { clearTimeout(timer); resolve(null); });
+      } catch (err) {
+        logToFile(`[MUSIC INFO ERROR] ${err}`);
+        resolve(null);
+      }
+    });
+    if (info) return { ...info, url, requestedBy: "" };
+    return { title: input, url, duration: "", requestedBy: "" };
+  }
+  return searchYoutube(input);
+}
+
+async function ensureMusicConnection(guild: any, member: any): Promise<any | null> {
+  const vc = member?.voice?.channel;
+  if (!vc || vc.type !== ChannelType.GuildVoice) return null;
+  let connection = getVoiceConnection(guild.id);
+  if (!connection) {
+    connection = joinVoiceChannel({
+      channelId: vc.id,
+      guildId: guild.id,
+      adapterCreator: guild.voiceAdapterCreator as any,
+    });
+  }
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+  } catch {
+    connection.destroy();
+    return null;
+  }
+  return connection;
+}
+
+function playNextTrack(guildId: string): void {
+  const state = getMusicState(guildId);
+  const connection = getVoiceConnection(guildId);
+  if (!connection) {
+    musicState.delete(guildId);
+    return;
+  }
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
+
+  const track = state.queue.shift();
+  if (!track) {
+    state.current = null;
+    state.idleTimer = setTimeout(() => {
+      const s = getMusicState(guildId);
+      if (s.queue.length === 0 && !s.current) {
+        const conn = getVoiceConnection(guildId);
+        if (conn) conn.destroy();
+        musicState.delete(guildId);
+      }
+    }, 30_000);
+    state.idleTimer.unref?.();
+    return;
+  }
+
+  state.current = track;
+  const player = createAudioPlayer();
+  state.player = player;
+  connection.subscribe(player);
+
+  try {
+    const child = ytdlp.exec(track.url, {
+      format: "bestaudio",
+      output: "-",
+      noPlaylist: true,
+      quiet: true,
+      noWarnings: true,
+    }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    child.catch?.(() => {});
+    const stream = child.stdout;
+    stream.on("error", (err: any) => {
+      logToFile(`[MUSIC STREAM ERROR] ${err?.message || err}`);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const line = chunk.toString().trim();
+      if (line.includes("ERROR")) logToFile(`[MUSIC] yt-dlp: ${line}`);
+    });
+    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+    player.play(resource);
+    logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId}`);
+  } catch (err) {
+    logToFile(`[MUSIC ERROR] Failed to start "${track.title}": ${err}`);
+    playNextTrack(guildId);
+    return;
+  }
+
+  if (state.textChannel) {
+    try {
+      void state.textChannel.send(`🎵 **Now playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""} — requested by **${track.requestedBy}**`);
+    } catch {}
+  }
+
+  player.on(AudioPlayerStatus.Idle, () => {
+    if (state.current?.url === track.url) playNextTrack(guildId);
+  });
+  player.on("error", (err: any) => {
+    logToFile(`[MUSIC ERROR] ${err?.message || err}`);
+    if (state.current?.url === track.url) playNextTrack(guildId);
+  });
+}
+
+function enqueueTrack(guildId: string, track: MusicTrack, textChannel: any): void {
+  const state = getMusicState(guildId);
+  state.textChannel = textChannel;
+  const wasEmpty = state.queue.length === 0 && !state.current;
+  state.queue.push(track);
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
+  if (wasEmpty) playNextTrack(guildId);
+}
+
+function stopMusic(guildId: string): void {
+  const state = getMusicState(guildId);
+  state.queue = [];
+  state.current = null;
+  if (state.player) {
+    try { state.player.removeAllListeners(); } catch {}
+    try { state.player.stop(); } catch {}
+  }
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
+  const connection = getVoiceConnection(guildId);
+  if (connection) connection.destroy();
+  musicState.delete(guildId);
+}
+
+function updateYtDlpInBackground(): void {
+  setTimeout(() => {
+    try {
+      const p: any = ytdlp.update();
+      if (p && typeof p.then === "function") {
+        p.then(
+          () => logToFile("[MUSIC] yt-dlp updated to latest version"),
+          (err: any) => logToFile(`[MUSIC] yt-dlp update failed (non-fatal): ${err?.stderr || err?.message || err}`)
+        );
+      }
+    } catch (err) {
+      logToFile(`[MUSIC] yt-dlp update failed (non-fatal): ${err}`);
+    }
+  }, 15_000).unref();
 }
 
 async function checkForBadWords(message: Message): Promise<void> {
@@ -2418,9 +2796,127 @@ async function handleMessage(message: Message): Promise<void> {
       await message.reply("❌ I'm not in a voice channel in this server.");
       return;
     }
-    connection.destroy();
+    stopMusic(message.guild!.id);
     logToFile(`[VOICE] ${message.author.tag} (${message.author.id}) made YOBNH leave voice`);
     await channel.send("👋 Left the voice channel!");
+    return;
+  }
+
+  if (prefixCommand === "play") {
+    if (isDM) {
+      await message.reply("❌ This command only works in a server.");
+      return;
+    }
+    const query = (parts.join(" ") || "").trim();
+    if (!query) {
+      await message.reply("❌ Usage: `&play <song name or YouTube link>`");
+      return;
+    }
+    const connection = await ensureMusicConnection(message.guild, message.member);
+    if (!connection) {
+      await message.reply("❌ You need to be in a voice channel!");
+      return;
+    }
+    await channel.send(`🔎 **Searching:** \`${query}\`...`);
+    const track = await resolveTrack(query);
+    if (!track) {
+      await channel.send("❌ Could not find that song.");
+      return;
+    }
+    track.requestedBy = message.author.username;
+    const state = getMusicState(message.guild!.id);
+    const wasEmpty = state.queue.length === 0 && !state.current;
+    enqueueTrack(message.guild!.id, track, channel);
+    await channel.send(
+      wasEmpty
+        ? `🎵 **Playing:** ${track.title}${track.duration ? ` (${track.duration})` : ""}`
+        : `➕ **Queued:** ${track.title}${track.duration ? ` (${track.duration})` : ""} (#${state.queue.length})`
+    );
+    return;
+  }
+
+  if (prefixCommand === "skip") {
+    if (isDM) {
+      await message.reply("❌ This command only works in a server.");
+      return;
+    }
+    const state = getMusicState(message.guild!.id);
+    if (!state.current && state.queue.length === 0) {
+      await message.reply("❌ Nothing is playing right now.");
+      return;
+    }
+    const current = state.current;
+    state.player?.stop();
+    await message.reply(`⏭️ **Skipped:** ${current ? current.title : "the current song"}`);
+    return;
+  }
+
+  if (prefixCommand === "pause") {
+    if (isDM) {
+      await message.reply("❌ This command only works in a server.");
+      return;
+    }
+    const state = getMusicState(message.guild!.id);
+    if (!state.player || state.player.state.status !== AudioPlayerStatus.Playing) {
+      await message.reply("❌ Nothing is playing right now.");
+      return;
+    }
+    state.player.pause();
+    await message.reply("⏸️ **Paused.** Use `&resume` to continue.");
+    return;
+  }
+
+  if (prefixCommand === "resume") {
+    if (isDM) {
+      await message.reply("❌ This command only works in a server.");
+      return;
+    }
+    const state = getMusicState(message.guild!.id);
+    if (!state.player || state.player.state.status !== AudioPlayerStatus.Paused) {
+      await message.reply("❌ Nothing is paused right now.");
+      return;
+    }
+    state.player.unpause();
+    await message.reply("▶️ **Resumed!**");
+    return;
+  }
+
+  if (prefixCommand === "stop") {
+    if (isDM) {
+      await message.reply("❌ This command only works in a server.");
+      return;
+    }
+    const connection = getVoiceConnection(message.guild!.id);
+    if (!connection) {
+      await message.reply("❌ I'm not in a voice channel in this server.");
+      return;
+    }
+    stopMusic(message.guild!.id);
+    logToFile(`[VOICE] ${message.author.tag} (${message.author.id}) stopped the music`);
+    await message.reply("🛑 **Stopped** the music and left the voice channel.");
+    return;
+  }
+
+  if (prefixCommand === "queue") {
+    if (isDM) {
+      await message.reply("❌ This command only works in a server.");
+      return;
+    }
+    const state = getMusicState(message.guild!.id);
+    const lines: string[] = [];
+    if (state.current) {
+      lines.push(`🎵 **Now playing:** ${state.current.title}${state.current.duration ? ` (${state.current.duration})` : ""} — requested by **${state.current.requestedBy}**`);
+    }
+    if (state.queue.length === 0) {
+      lines.push("The queue is empty.");
+    } else {
+      lines.push(`**Up next (${state.queue.length}):**`);
+      state.queue.slice(0, 10).forEach((t, i) => {
+        lines.push(`${i + 1}. ${t.title}${t.duration ? ` (${t.duration})` : ""} — requested by **${t.requestedBy}**`);
+      });
+      if (state.queue.length > 10) lines.push(`...and ${state.queue.length - 10} more`);
+    }
+    await message.reply(lines.join("\n"));
     return;
   }
 
@@ -2775,6 +3271,7 @@ async function main() {
   startHardwarePerformanceWatchdog();
   startTempCleanup();
   startTempBlacklistCleanup();
+  updateYtDlpInBackground();
   loadBlacklist();
 
   if (!DISCORD_TOKEN) {

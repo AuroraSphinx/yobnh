@@ -1,6 +1,6 @@
 {
     "name": "discord-ai-bot",
-    "version": "1.7.0",
+    "version": "1.8.0",
     "description": "Discord AI bot powered by Claude",
     "main": "dist/index.js",
     "type": "commonjs",
@@ -20,7 +20,9 @@
         "openai": "^4.104.0",
         "opusscript": "^0.0.8",
         "pidusage": "^4.0.1",
-        "ws": "^8.21.0"
+        "ws": "^8.21.0",
+        "youtube-dl-exec": "^3.1.12",
+        "youtube-search-api": "^2.0.1"
     },
     "devDependencies": {
         "@types/node": "^20.19.42",
