@@ -12,7 +12,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import readline from "readline";
-import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, EmbedBuilder, Team, ActivityType, PresenceUpdateStatus, ChannelType } from "discord.js";
+import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, Team, ActivityType, PresenceUpdateStatus, ChannelType, SectionBuilder, TextDisplayBuilder, SeparatorBuilder, ThumbnailBuilder, ContainerBuilder, MessageFlags } from "discord.js";
 import { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState } from "@discordjs/voice";
 const DiscordTTS = require("discord-tts");
 import { OpenAI } from "openai";
@@ -1254,8 +1254,9 @@ async function fetchLatestCommits(perPage = 10): Promise<any[]> {
   return await resp.json();
 }
 
-function buildCommitEmbeds(commits: any[]): EmbedBuilder[] {
-  return commits.map((c: any) => {
+function buildCommitComponents(commits: any[]): any[] {
+  const components: any[] = [];
+  for (const c of commits) {
     const authorName = c.commit?.author?.name || c.commit?.committer?.name || "Unknown";
     const authorAvatar = c.author?.avatar_url || null;
     const sha = c.sha.slice(0, 7);
@@ -1264,27 +1265,31 @@ function buildCommitEmbeds(commits: any[]): EmbedBuilder[] {
     const bodyText = bodyLines.join("\n").replace(/\s+/g, " ").trim();
     const dateStr = c.commit?.author?.date ? new Date(c.commit.author.date).toLocaleString() : "Unknown";
 
-    return new EmbedBuilder()
-      .setColor(0x57F287)
-      .setAuthor({ name: authorName, iconURL: authorAvatar || undefined })
-      .setTitle(firstLine || "(no commit message)")
-      .setURL(c.html_url || undefined)
-      .setDescription(bodyText.length > 0 ? bodyText.slice(0, 1000) : null)
-      .addFields(
-        { name: "Commit", value: `\`${sha}\``, inline: true },
-        { name: "Date", value: dateStr, inline: true }
-      )
-      .setTimestamp();
-  });
+    let sectionText = `**${firstLine || "(no commit message)"}**\n\nby ${authorName}`;
+    if (bodyText.length > 0) sectionText += `\n\n${bodyText.slice(0, 1000)}`;
+    sectionText += `\n\nCommit: \`${sha}\` · ${dateStr}`;
+    if (c.html_url) sectionText += `\n[Open commit](${c.html_url})`;
+
+    const section = new SectionBuilder().addTextDisplayComponents(new TextDisplayBuilder().setContent(sectionText));
+    if (authorAvatar) section.setThumbnailAccessory(new ThumbnailBuilder().setURL(authorAvatar));
+    components.push(section);
+    components.push(new SeparatorBuilder());
+  }
+  if (components.length) components.pop();
+  return components;
 }
 
-async function sendEmbedsToChannel(channelId: string, embeds: EmbedBuilder[]): Promise<void> {
+async function postCommitsToChannel(channelId: string, commits: any[]): Promise<void> {
+  for (let i = 0; i < commits.length; i += 5) {
+    const batch = buildCommitComponents(commits.slice(i, i + 5));
+    await sendComponentsToChannel(channelId, batch);
+  }
+}
+
+async function sendComponentsToChannel(channelId: string, components: any[]): Promise<void> {
   const target = discord.channels.cache.get(channelId);
   if (!target || !("send" in target)) throw new Error("configured channel is not accessible");
-  for (let i = 0; i < embeds.length; i += 10) {
-    const batch = embeds.slice(i, i + 10);
-    await (target as any).send({ embeds: batch });
-  }
+  await (target as any).send({ components, flags: MessageFlags.IsComponentsV2 });
 }
 
 async function postNewCommitsToChannel(channelId: string): Promise<number> {
@@ -1296,7 +1301,7 @@ async function postNewCommitsToChannel(channelId: string): Promise<number> {
     newCommits.push(c);
   }
   if (!newCommits.length) return 0;
-  await sendEmbedsToChannel(channelId, buildCommitEmbeds(newCommits));
+  await postCommitsToChannel(channelId, newCommits);
   saveUpdateChannelConfig({ channelId, lastSha: newCommits[0].sha });
   return newCommits.length;
 }
@@ -1447,26 +1452,29 @@ discord.on(Events.InteractionCreate, (interaction) => {
 
         const statusIcon = isThrottled ? "Throttled" : "Normal";
 
-        const embed = new EmbedBuilder()
-          .setTitle(`${BOT_NAME} ${BOT_VERSION}`)
-          .setColor(healthColor)
-          .addFields(
-            { name: "Status", value: `**${healthStatus}**`, inline: true },
-            { name: "Uptime", value: uptimeStr, inline: true },
-            { name: "Ping", value: `${pingLatency}ms`, inline: true },
-            { name: "CPU Usage", value: `${cpuPercent}%`, inline: true },
-            { name: "Memory Usage", value: `${memUsedPercent}% (${memUsedMB}/${memTotalMB} MB)`, inline: true },
-            { name: "Run Mode", value: RUNNING_MODE.toUpperCase(), inline: true },
-            { name: "Throttle State", value: statusIcon, inline: true },
-            { name: "Guilds", value: `${guildCount}`, inline: true },
-            { name: "Cached Users", value: `${userCount}`, inline: true },
-            { name: "Active Conversations", value: `${conversationCount}`, inline: true },
-            { name: "Model", value: `\`${RESPONSE_MODEL || "N/A"}\``, inline: false }
+        const healthStructure = new ContainerBuilder()
+          .setAccentColor(healthColor)
+          .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+              `# **${BOT_NAME} ${BOT_VERSION}**\n\n**Status:** ${healthStatus} · **Uptime:** ${uptimeStr} · **Ping:** ${pingLatency}ms`
+            )
           )
-          .setFooter({ text: `Health Score: ${healthScore}/8` })
-          .setTimestamp();
+          .addSeparatorComponents(new SeparatorBuilder())
+          .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(
+              `**CPU Usage:** ${cpuPercent}%\n` +
+              `**Memory Usage:** ${memUsedPercent}% (${memUsedMB}/${memTotalMB} MB)\n` +
+              `**Run Mode:** ${RUNNING_MODE.toUpperCase()}\n` +
+              `**Throttle State:** ${statusIcon}\n` +
+              `**Guilds:** ${guildCount}\n` +
+              `**Cached Users:** ${userCount}\n` +
+              `**Active Conversations:** ${conversationCount}\n` +
+              `**Model:** \`${RESPONSE_MODEL || "N/A"}\`\n\n` +
+              `*Health Score: ${healthScore}/8*`
+            )
+          );
 
-        await interaction.editReply({ embeds: [embed] });
+        await interaction.editReply({ components: [healthStructure], flags: MessageFlags.IsComponentsV2 });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error("Health check failed:", err);
@@ -1605,12 +1613,10 @@ discord.on(Events.InteractionCreate, (interaction) => {
       const targetChannel = interaction.options.getChannel("channel", true);
 
       if (!GITHUB_TOKEN) {
-        const failEmbed = new EmbedBuilder()
-          .setColor(0xED4245)
-          .setTitle("❌ Commit Fetch Failed")
-          .setDescription("No `GITHUB_TOKEN` environment variable is set. Cannot access the private repository.")
-          .setTimestamp();
-        await interaction.editReply({ embeds: [failEmbed] });
+        const failText = new TextDisplayBuilder().setContent(
+          `# ❌ Commit Fetch Failed\n\nNo \`GITHUB_TOKEN\` environment variable is set. Cannot access the private repository.`
+        );
+        await interaction.editReply({ components: [failText], flags: MessageFlags.IsComponentsV2 });
         return;
       }
 
@@ -1626,19 +1632,17 @@ discord.on(Events.InteractionCreate, (interaction) => {
           return;
         }
 
-        await sendEmbedsToChannel(targetChannel.id, buildCommitEmbeds(commits));
+        await postCommitsToChannel(targetChannel.id, commits);
         saveUpdateChannelConfig({ channelId: targetChannel.id, lastSha: commits[0].sha });
         await interaction.editReply({ content: `✅ Automatic commit updates **enabled** in <#${targetChannel.id}>. Posted the latest **${commits.length}** commit(s); new commits will be auto-posted every 5 minutes.` });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const config = loadUpdateChannelConfig();
         saveUpdateChannelConfig({ channelId: targetChannel.id, lastSha: config.lastSha });
-        const failEmbed = new EmbedBuilder()
-          .setColor(0xED4245)
-          .setTitle("❌ Commit Fetch Failed")
-          .setDescription(`Channel was saved, but fetching commits failed:\n\`\`\`${msg}\`\`\``)
-          .setTimestamp();
-        try { await interaction.editReply({ embeds: [failEmbed] }); } catch {}
+        const failText = new TextDisplayBuilder().setContent(
+          `# ❌ Commit Fetch Failed\n\nChannel was saved, but fetching commits failed:\n\`\`\`${msg}\`\`\``
+        );
+        try { await interaction.editReply({ components: [failText], flags: MessageFlags.IsComponentsV2 }); } catch {}
       }
     });
   }
@@ -1725,18 +1729,17 @@ discord.on(Events.InteractionCreate, (interaction) => {
           ? `https://discord.com/channels/@me/${interaction.channelId}`
           : `https://discord.com/channels/${interaction.guildId}/${interaction.channelId}`;
 
-        const embed = new EmbedBuilder()
-          .setColor(0x5865F2)
-          .setTitle("Notice from Aurora")
-          .setDescription(msgContent)
-          .addFields(
-            { name: "From", value: `${interaction.user.tag} (\`${interaction.user.id}\`)`, inline: true },
-            { name: "Server", value: guildName, inline: true },
-            { name: "Channel", value: channelName, inline: true }
+        const noticeStructure = new SectionBuilder().addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `# Notice from Aurora\n\n${msgContent}\n\n` +
+            `**From:** ${interaction.user.tag} (\`${interaction.user.id}\`)\n` +
+            `**Server:** ${guildName}\n` +
+            `**Channel:** ${channelName}\n\n` +
+            `[Open message](${messageLink})`
           )
-          .setTimestamp();
+        );
 
-        await owner.send({ content: messageLink, embeds: [embed] });
+        await owner.send({ components: [noticeStructure], flags: MessageFlags.IsComponentsV2 });
 
         await interaction.editReply({ content: "✅ Your notice has been sent to AuroraSphinx!" });
       } catch (err) {
@@ -1915,19 +1918,15 @@ async function executeSingleAction(parsed: any, channel: any, userId: string, ch
 
     if (channel.guild && !channel.guild.members.me?.permissions.has(PermissionsBitField.Flags.BanMembers)) {
       const permErr = "Aborted: I do not possess Ban Members permissions in this guild setup.";
-      const errEmbed = new EmbedBuilder()
-        .setColor(0xED4245)
-        .setDescription(`❌ ${permErr}`);
-      await channel.send({ embeds: [errEmbed] });
+      const errText = new TextDisplayBuilder().setContent(`❌ ${permErr}`);
+      await channel.send({ components: [errText], flags: MessageFlags.IsComponentsV2 });
       addToHistory(channelId, userId, "assistant", permErr);
       return;
     }
 
     // Phase 1: Post initial loading status message update
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(0xFEE75C)
-      .setDescription(`⏳ **Banning** \`${userQuery}\`...\n\n*making actions*`);
-    const statusMessage = await channel.send({ embeds: [loadingEmbed] });
+    const loadingText = new TextDisplayBuilder().setContent(`⏳ **Banning** \`${userQuery}\`...\n\n*making actions*`);
+    const statusMessage = await channel.send({ components: [loadingText], flags: MessageFlags.IsComponentsV2 });
 
     try {
       // Look up target member or resolve directly from user object configurations
@@ -1951,25 +1950,21 @@ async function executeSingleAction(parsed: any, channel: any, userId: string, ch
       const pfpUrl = targetUserObj ? targetUserObj.displayAvatarURL({ size: 256 }) : discord.user?.displayAvatarURL();
 
       // Phase 2: Success state display block complete with user avatar attachment mapping
-      const successEmbed = new EmbedBuilder()
-        .setColor(0xED4245)
-        .setTitle('🔨 Ban Confirmation Logged')
-        .setDescription(`**Banned!** \`${targetTag}\``)
-        .setThumbnail(pfpUrl)
-        .addFields(
-          { name: '👤 Target ID', value: `\`${targetId}\``, inline: true },
-          { name: '📝 Reason Given', value: `\`\`\`${reason}\`\`\`` }
+      const successSection = new SectionBuilder().addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `# 🔨 Ban Confirmation Logged\n\n**Banned!** \`${targetTag}\`\n\n` +
+          `**👤 Target ID:** \`${targetId}\`\n` +
+          `**📝 Reason Given:**\n\`\`\`${reason}\`\`\``
         )
-        .setTimestamp();
+      );
+      if (pfpUrl) successSection.setThumbnailAccessory(new ThumbnailBuilder().setURL(pfpUrl));
 
-      await statusMessage.edit({ embeds: [successEmbed] });
+      await statusMessage.edit({ components: [successSection], flags: MessageFlags.IsComponentsV2 });
       addToHistory(channelId, userId, "assistant", `Successfully banned user: ${targetTag} (${targetId})`);
 
     } catch (err: any) {
-      const failEmbed = new EmbedBuilder()
-        .setColor(0xED4245)
-        .setDescription(`❌ **Ban Action execution aborted:** ${err.message}`);
-      await statusMessage.edit({ embeds: [failEmbed] });
+      const failText = new TextDisplayBuilder().setContent(`❌ **Ban Action execution aborted:** ${err.message}`);
+      await statusMessage.edit({ components: [failText], flags: MessageFlags.IsComponentsV2 });
       addToHistory(channelId, userId, "assistant", `Failed to ban target: ${err.message}`);
     }
   }
@@ -1981,35 +1976,28 @@ async function executeSingleAction(parsed: any, channel: any, userId: string, ch
 
     if (channel.guild && !channel.guild.members.me?.permissions.has(PermissionsBitField.Flags.BanMembers)) {
       const permErr = "Aborted: I do not possess Ban Members permissions to process unban request.";
-      const errEmbed = new EmbedBuilder().setColor(0xED4245).setDescription(`❌ ${permErr}`);
-      await channel.send({ embeds: [errEmbed] });
+      const errText = new TextDisplayBuilder().setContent(`❌ ${permErr}`);
+      await channel.send({ components: [errText], flags: MessageFlags.IsComponentsV2 });
       addToHistory(channelId, userId, "assistant", permErr);
       return;
     }
 
-    const loadingEmbed = new EmbedBuilder()
-      .setColor(0xFEE75C)
-      .setDescription(`⏳ **Unbanning** \`${userQuery}\`...`);
-    const statusMessage = await channel.send({ embeds: [loadingEmbed] });
+    const loadingText = new TextDisplayBuilder().setContent(`⏳ **Unbanning** \`${userQuery}\`...`);
+    const statusMessage = await channel.send({ components: [loadingText], flags: MessageFlags.IsComponentsV2 });
 
     try {
       await channel.guild?.members.unban(userQuery, reason);
       await new Promise(resolve => setTimeout(resolve, 1000));
 
-      const successEmbed = new EmbedBuilder()
-        .setColor(0x57F287)
-        .setTitle('🕊️ Unban Confirmation Logged')
-        .setDescription(`**Unbanned User ID:** \`${userQuery}\``)
-        .addFields({ name: '📝 Reason Given', value: `\`\`\`${reason}\`\`\`` })
-        .setTimestamp();
+      const successText = new TextDisplayBuilder().setContent(
+        `# 🕊️ Unban Confirmation Logged\n\n**Unbanned User ID:** \`${userQuery}\`\n\n**📝 Reason Given:**\n\`\`\`${reason}\`\`\``
+      );
 
-      await statusMessage.edit({ embeds: [successEmbed] });
+      await statusMessage.edit({ components: [successText], flags: MessageFlags.IsComponentsV2 });
       addToHistory(channelId, userId, "assistant", `Successfully unbanned user ID: ${userQuery}`);
     } catch (err: any) {
-      const failEmbed = new EmbedBuilder()
-        .setColor(0xED4245)
-        .setDescription(`❌ **Unban Action execution aborted:** ${err.message}`);
-      await statusMessage.edit({ embeds: [failEmbed] });
+      const failText = new TextDisplayBuilder().setContent(`❌ **Unban Action execution aborted:** ${err.message}`);
+      await statusMessage.edit({ components: [failText], flags: MessageFlags.IsComponentsV2 });
       addToHistory(channelId, userId, "assistant", `Failed to unban user ID ${userQuery}: ${err.message}`);
     }
   }
@@ -2189,18 +2177,16 @@ async function checkForBadWords(message: Message): Promise<void> {
   if (OWNER_ID) {
     try {
       const owner = await discord.users.fetch(OWNER_ID);
-      const embed = new EmbedBuilder()
-        .setColor(0xED4245)
-        .setTitle("🚨 Bad Word Alert")
-        .setDescription(`**${message.author.tag}** used a banned word:\n\`\`\`${words}\`\`\``)
-        .addFields(
-          { name: "User", value: `${message.author.tag} (\`${message.author.id}\`)`, inline: true },
-          { name: "Server", value: guildName, inline: true },
-          { name: "Channel", value: channelName, inline: true }
+      const alertSection = new SectionBuilder().addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `# 🚨 Bad Word Alert\n\n**${message.author.tag}** used a banned word:\n\`\`\`${words}\`\`\`\n\n` +
+          `**User:** ${message.author.tag} (\`${message.author.id}\`)\n` +
+          `**Server:** ${guildName}\n` +
+          `**Channel:** ${channelName}\n\n` +
+          `${textToScan.slice(0, 500) || "(empty message)"}`
         )
-        .setTimestamp();
-      const content = textToScan.slice(0, 500) || "(empty message)";
-      await owner.send({ content: `🚨 **Bad word detected:** ${content}`, embeds: [embed] });
+      );
+      await owner.send({ components: [alertSection], flags: MessageFlags.IsComponentsV2 });
     } catch {}
   }
 }
@@ -2367,26 +2353,29 @@ async function handleMessage(message: Message): Promise<void> {
 
       const statusIcon = isThrottled ? "Throttled" : "Normal";
 
-      const embed = new EmbedBuilder()
-        .setTitle(`${BOT_NAME} ${BOT_VERSION}`)
-        .setColor(healthColor)
-        .addFields(
-          { name: "Status", value: `**${healthStatus}**`, inline: true },
-          { name: "Uptime", value: uptimeStr, inline: true },
-          { name: "Ping", value: `${pingLatency}ms`, inline: true },
-          { name: "CPU Usage", value: `${cpuPercent}%`, inline: true },
-          { name: "Memory Usage", value: `${memUsedPercent}% (${memUsedMB}/${memTotalMB} MB)`, inline: true },
-          { name: "Run Mode", value: RUNNING_MODE.toUpperCase(), inline: true },
-          { name: "Throttle State", value: statusIcon, inline: true },
-          { name: "Guilds", value: `${guildCount}`, inline: true },
-          { name: "Cached Users", value: `${userCount}`, inline: true },
-          { name: "Active Conversations", value: `${conversationCount}`, inline: true },
-          { name: "Model", value: `\`${RESPONSE_MODEL || "N/A"}\``, inline: false }
+      const healthStructure = new ContainerBuilder()
+        .setAccentColor(healthColor)
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `# **${BOT_NAME} ${BOT_VERSION}**\n\n**Status:** ${healthStatus} · **Uptime:** ${uptimeStr} · **Ping:** ${pingLatency}ms`
+          )
         )
-        .setFooter({ text: `Health Score: ${healthScore}/8` })
-        .setTimestamp();
+        .addSeparatorComponents(new SeparatorBuilder())
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(
+            `**CPU Usage:** ${cpuPercent}%\n` +
+            `**Memory Usage:** ${memUsedPercent}% (${memUsedMB}/${memTotalMB} MB)\n` +
+            `**Run Mode:** ${RUNNING_MODE.toUpperCase()}\n` +
+            `**Throttle State:** ${statusIcon}\n` +
+            `**Guilds:** ${guildCount}\n` +
+            `**Cached Users:** ${userCount}\n` +
+            `**Active Conversations:** ${conversationCount}\n` +
+            `**Model:** \`${RESPONSE_MODEL || "N/A"}\`\n\n` +
+            `*Health Score: ${healthScore}/8*`
+          )
+        );
 
-      await channel.send({ embeds: [embed] });
+      await channel.send({ components: [healthStructure], flags: MessageFlags.IsComponentsV2 });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("Health check failed:", err);
@@ -2477,18 +2466,17 @@ async function handleMessage(message: Message): Promise<void> {
         ? `https://discord.com/channels/@me/${message.channel.id}`
         : `https://discord.com/channels/${message.guild.id}/${message.channel.id}`;
 
-      const embed = new EmbedBuilder()
-        .setColor(0x5865F2)
-        .setTitle("Notice from Aurora")
-        .setDescription(msgContent)
-        .addFields(
-          { name: "From", value: `${message.author.tag} (\`${message.author.id}\`)`, inline: true },
-          { name: "Server", value: guildName, inline: true },
-          { name: "Channel", value: channelName, inline: true }
+      const noticeStructure = new SectionBuilder().addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `# Notice from Aurora\n\n${msgContent}\n\n` +
+          `**From:** ${message.author.tag} (\`${message.author.id}\`)\n` +
+          `**Server:** ${guildName}\n` +
+          `**Channel:** ${channelName}\n\n` +
+          `[Open message](${messageLink})`
         )
-        .setTimestamp();
+      );
 
-      await owner.send({ content: messageLink, embeds: [embed] });
+      await owner.send({ components: [noticeStructure], flags: MessageFlags.IsComponentsV2 });
       await message.reply("✅ Your notice has been sent to AuroraSphinx!");
     } catch (err) {
       logToFile(`[NOTICE ERROR] Failed to send notice from ${message.author.tag}: ${err}`);
@@ -2527,7 +2515,7 @@ async function handleMessage(message: Message): Promise<void> {
         await channel.send(`✅ Automatic commit updates **enabled** in <#${targetId}>. The repo currently has no commits.`);
         return;
       }
-      await sendEmbedsToChannel(targetId, buildCommitEmbeds(commits));
+      await postCommitsToChannel(targetId, commits);
       saveUpdateChannelConfig({ channelId: targetId, lastSha: commits[0].sha });
       await channel.send(`✅ Automatic commit updates **enabled** in <#${targetId}>. Posted the latest **${commits.length}** commit(s); new commits will be auto-posted every 5 minutes.`);
     } catch (err) {
