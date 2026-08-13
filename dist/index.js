@@ -1830,8 +1830,8 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
             const state = getMusicState(interaction.guildId);
             const wasEmpty = state.queue.length === 0 && !state.current;
             enqueueTrack(interaction.guildId, track, interaction.channel);
-            const playReply = buildMusicSection(wasEmpty ? `# 🎵 Playing` : `# ➕ Queued (#${state.queue.length})`, track);
-            await interaction.editReply({ components: [playReply], flags: discord_js_1.MessageFlags.IsComponentsV2 });
+            const playReply = buildMusicEmbed(wasEmpty ? `🎵 Playing` : `➕ Queued (#${state.queue.length})`, track);
+            await interaction.editReply({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
         });
         return;
     }
@@ -2381,14 +2381,30 @@ async function ensureMusicConnection(guild, member) {
     }
     return connection;
 }
-function buildMusicSection(heading, track, extraLine) {
-    const section = new discord_js_1.SectionBuilder().addTextDisplayComponents(new discord_js_1.TextDisplayBuilder().setContent(`${heading}\n\n` +
-        `**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}` +
+const PLAYING_GIF_PATH = path.join(process.cwd(), "assets", "playing.gif");
+function getPlayingGifAttachment() {
+    try {
+        if (fs.existsSync(PLAYING_GIF_PATH)) {
+            return new discord_js_1.AttachmentBuilder(PLAYING_GIF_PATH, { name: "playing.gif" });
+        }
+    }
+    catch { }
+    return null;
+}
+function buildMusicEmbed(heading, track, extraLine) {
+    const embed = new discord_js_1.EmbedBuilder()
+        .setColor(0x2b6cb0)
+        .setTitle(heading)
+        .setDescription(`**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}` +
         (extraLine ? `\n${extraLine}` : "") +
-        `\n🔗 ${track.url}`));
+        `\n🔗 [Watch on YouTube](${track.url})`)
+        .setFooter({ text: track.requestedBy ? `Requested by ${track.requestedBy}` : "" });
     if (track.thumbnail)
-        section.setThumbnailAccessory(new discord_js_1.ThumbnailBuilder().setURL(track.thumbnail));
-    return section;
+        embed.setThumbnail(track.thumbnail);
+    const gif = getPlayingGifAttachment();
+    if (gif)
+        embed.setImage("attachment://playing.gif");
+    return { embeds: [embed], files: gif ? [gif] : [] };
 }
 function playNextTrack(guildId) {
     const state = getMusicState(guildId);
@@ -2462,11 +2478,8 @@ function playNextTrack(guildId) {
     }
     if (state.textChannel) {
         try {
-            const nowPlayingSection = buildMusicSection(`# 🎵 Now Playing`, track, `**Requested by:** ${track.requestedBy}`);
-            void state.textChannel.send({
-                components: [nowPlayingSection],
-                flags: discord_js_1.MessageFlags.IsComponentsV2,
-            });
+            const nowPlaying = buildMusicEmbed(`🎵 Now Playing`, track, `**Requested by:** ${track.requestedBy}`);
+            void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined });
         }
         catch { }
     }
@@ -2816,8 +2829,8 @@ async function handleMessage(message) {
         const state = getMusicState(message.guild.id);
         const wasEmpty = state.queue.length === 0 && !state.current;
         enqueueTrack(message.guild.id, track, channel);
-        const playReply = buildMusicSection(wasEmpty ? `# 🎵 Playing` : `# ➕ Queued (#${state.queue.length})`, track);
-        await channel.send({ components: [playReply], flags: discord_js_1.MessageFlags.IsComponentsV2 });
+        const playReply = buildMusicEmbed(wasEmpty ? `🎵 Playing` : `➕ Queued (#${state.queue.length})`, track);
+        await channel.send({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
         return;
     }
     if (prefixCommand === "skip") {

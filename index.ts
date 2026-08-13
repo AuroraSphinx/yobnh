@@ -12,7 +12,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import readline from "readline";
-import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, Team, ActivityType, PresenceUpdateStatus, ChannelType, SectionBuilder, TextDisplayBuilder, SeparatorBuilder, ThumbnailBuilder, ContainerBuilder, MessageFlags } from "discord.js";
+import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, Team, ActivityType, PresenceUpdateStatus, ChannelType, SectionBuilder, TextDisplayBuilder, SeparatorBuilder, ThumbnailBuilder, ContainerBuilder, MessageFlags, EmbedBuilder } from "discord.js";
 import { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState, AudioPlayer } from "@discordjs/voice";
 const DiscordTTS = require("discord-tts");
 const ytdlp = require("youtube-dl-exec");
@@ -1842,11 +1842,11 @@ discord.on(Events.InteractionCreate, (interaction) => {
       const state = getMusicState(interaction.guildId);
       const wasEmpty = state.queue.length === 0 && !state.current;
       enqueueTrack(interaction.guildId, track, interaction.channel);
-      const playReply = buildMusicSection(
-        wasEmpty ? `# 🎵 Playing` : `# ➕ Queued (#${state.queue.length})`,
+      const playReply = buildMusicEmbed(
+        wasEmpty ? `🎵 Playing` : `➕ Queued (#${state.queue.length})`,
         track
       );
-      await interaction.editReply({ components: [playReply], flags: MessageFlags.IsComponentsV2 });
+      await interaction.editReply({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
     });
     return;
   }
@@ -2424,17 +2424,31 @@ async function ensureMusicConnection(guild: any, member: any): Promise<any | nul
   return connection;
 }
 
-function buildMusicSection(heading: string, track: MusicTrack, extraLine?: string): SectionBuilder {
-  const section = new SectionBuilder().addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(
-      `${heading}\n\n` +
+const PLAYING_GIF_PATH = path.join(process.cwd(), "assets", "playing.gif");
+
+function getPlayingGifAttachment(): AttachmentBuilder | null {
+  try {
+    if (fs.existsSync(PLAYING_GIF_PATH)) {
+      return new AttachmentBuilder(PLAYING_GIF_PATH, { name: "playing.gif" });
+    }
+  } catch {}
+  return null;
+}
+
+function buildMusicEmbed(heading: string, track: MusicTrack, extraLine?: string): { embeds: EmbedBuilder[]; files: AttachmentBuilder[] } {
+  const embed = new EmbedBuilder()
+    .setColor(0x2b6cb0)
+    .setTitle(heading)
+    .setDescription(
       `**${track.title}**${track.duration ? `\n⏱️ ${track.duration}` : ""}` +
       (extraLine ? `\n${extraLine}` : "") +
-      `\n🔗 ${track.url}`
+      `\n🔗 [Watch on YouTube](${track.url})`
     )
-  );
-  if (track.thumbnail) section.setThumbnailAccessory(new ThumbnailBuilder().setURL(track.thumbnail));
-  return section;
+    .setFooter({ text: track.requestedBy ? `Requested by ${track.requestedBy}` : "" });
+  if (track.thumbnail) embed.setThumbnail(track.thumbnail);
+  const gif = getPlayingGifAttachment();
+  if (gif) embed.setImage("attachment://playing.gif");
+  return { embeds: [embed], files: gif ? [gif] : [] };
 }
 
 function playNextTrack(guildId: string): void {
@@ -2510,15 +2524,12 @@ function playNextTrack(guildId: string): void {
 
   if (state.textChannel) {
     try {
-      const nowPlayingSection = buildMusicSection(
-        `# 🎵 Now Playing`,
+      const nowPlaying = buildMusicEmbed(
+        `🎵 Now Playing`,
         track,
         `**Requested by:** ${track.requestedBy}`
       );
-      void state.textChannel.send({
-        components: [nowPlayingSection],
-        flags: MessageFlags.IsComponentsV2,
-      });
+      void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined });
     } catch {}
   }
 
@@ -2879,11 +2890,11 @@ async function handleMessage(message: Message): Promise<void> {
     const state = getMusicState(message.guild!.id);
     const wasEmpty = state.queue.length === 0 && !state.current;
     enqueueTrack(message.guild!.id, track, channel);
-    const playReply = buildMusicSection(
-      wasEmpty ? `# 🎵 Playing` : `# ➕ Queued (#${state.queue.length})`,
+    const playReply = buildMusicEmbed(
+      wasEmpty ? `🎵 Playing` : `➕ Queued (#${state.queue.length})`,
       track
     );
-    await channel.send({ components: [playReply], flags: MessageFlags.IsComponentsV2 });
+    await channel.send({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
     return;
   }
 
