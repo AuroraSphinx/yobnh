@@ -12,10 +12,9 @@ const child_process_1 = require("child_process");
 function getDiscordClient() {
     return global.discordClientInstance || null;
 }
-const PORT = Number(process.env.ADMIN_PORT ?? 3000);
-const ADMIN_USER = process.env.ADMIN_USER ?? "admin";
-const ADMIN_PASS = process.env.ADMIN_PASS ?? "aurora2026";
-const LOG_FILE = path_1.default.join(__dirname, "bot-errors.log");
+const PORT = Number(process.env.ADMIN_PORT);
+const ADMIN_USER = process.env.ADMIN_USER;
+const ADMIN_PASS = process.env.ADMIN_PASS;
 // --- Bot Process Management ---
 let botProcess = null;
 let botRunning = false;
@@ -157,10 +156,11 @@ function checkAuth(req, res) {
     return true;
 }
 function readErrors() {
+    const logFile = path_1.default.join(__dirname, "bot-errors.log");
     try {
-        if (!fs_1.default.existsSync(LOG_FILE))
+        if (!fs_1.default.existsSync(logFile))
             return [];
-        const lines = fs_1.default.readFileSync(LOG_FILE, "utf8").trim().split("\n").filter(Boolean);
+        const lines = fs_1.default.readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean);
         return lines
             .map((line) => {
             try {
@@ -399,6 +399,11 @@ const server = http_1.default.createServer((req, res) => {
     res.writeHead(404);
     res.end("Not found");
 });
-server.listen(PORT, () => {
-    console.log(`✅ Admin panel running at http://localhost:${PORT}`);
-});
+if (!PORT || !ADMIN_USER || !ADMIN_PASS) {
+    console.log("Admin panel disabled. Set ADMIN_PORT, ADMIN_USER, and ADMIN_PASS to enable.");
+}
+else {
+    server.listen(PORT, () => {
+        console.log(`✅ Admin panel running at http://localhost:${PORT}`);
+    });
+}
