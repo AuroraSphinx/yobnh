@@ -2501,8 +2501,18 @@ function playNextTrack(guildId) {
                 quiet: true,
                 noWarnings: true,
             }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-            child.catch?.(() => { });
             const stream = child.stdout;
+            if (!stream) {
+                logToFile(`[MUSIC ERROR] yt-dlp produced no stream for "${track.title}"`);
+                child.catch?.((err) => logToFile(`[MUSIC ERROR] yt-dlp: ${err?.stderr || err?.message || err}`));
+                playNextTrack(guildId);
+                return;
+            }
+            child.catch?.((err) => {
+                logToFile(`[MUSIC ERROR] yt-dlp spawn failed for "${track.title}": ${err?.stderr || err?.message || err}`);
+            });
+            let streamBytes = 0;
+            stream.on("data", (chunk) => { streamBytes += chunk.length; });
             stream.on("error", (err) => {
                 logToFile(`[MUSIC STREAM ERROR] ${err?.message || err}`);
             });
@@ -2511,6 +2521,15 @@ function playNextTrack(guildId) {
                 if (line.includes("ERROR"))
                     logToFile(`[MUSIC] yt-dlp: ${line}`);
             });
+            setTimeout(() => {
+                if (streamBytes === 0 && state.current?.url === track.url) {
+                    logToFile(`[MUSIC ERROR] Stream for "${track.title}" produced 0 bytes in 10s — stopping.`);
+                    player.stop(true);
+                    if (state.textChannel) {
+                        state.textChannel.send("❌ Could not play that — the stream returned no audio (yt-dlp/ffmpeg issue). Check `logs.txt`.").catch(() => { });
+                    }
+                }
+            }, 10_000).unref?.();
             // StreamType.Arbitrary lets @discordjs/voice transcode with ffmpeg (via prism-media/ffmpeg-static)
             resource = (0, voice_1.createAudioResource)(stream, { inputType: voice_1.StreamType.Arbitrary });
             logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
@@ -2586,6 +2605,38 @@ function updateYtDlpInBackground() {
             logToFile(`[MUSIC] yt-dlp update failed (non-fatal): ${err}`);
         }
     }, 15_000).unref();
+}
+function checkMusicToolchain() {
+    setTimeout(() => {
+        try {
+            const ytPath = ytdlp.constants?.YOUTUBE_DL_PATH || "unknown";
+            const ytExists = typeof ytPath === "string" && ytPath !== "unknown" ? fs.existsSync(ytPath) : false;
+            let ffmpegPath = "unknown";
+            let ffmpegExists = false;
+            try {
+                ffmpegPath = require("ffmpeg-static");
+                ffmpegExists = typeof ffmpegPath === "string" && ffmpegPath.length > 0 && fs.existsSync(ffmpegPath);
+            }
+            catch {
+                try {
+                    const which = require("child_process").execFileSync("which", ["ffmpeg"]).toString().trim();
+                    if (which) {
+                        ffmpegPath = which;
+                        ffmpegExists = fs.existsSync(which);
+                    }
+                }
+                catch { }
+            }
+            logToFile(`[MUSIC] Toolchain check — yt-dlp: ${ytPath} (exists: ${ytExists}) | ffmpeg: ${ffmpegPath} (exists: ${ffmpegExists})`);
+            if (!ytExists)
+                logToFile(`[MUSIC WARN] yt-dlp binary missing — &play YouTube streaming will fail silently. Run npm install to restore it.`);
+            if (!ffmpegExists)
+                logToFile(`[MUSIC WARN] ffmpeg not found — audio transcoding will fail. Install ffmpeg-static or system ffmpeg.`);
+        }
+        catch (err) {
+            logToFile(`[MUSIC] Toolchain check failed: ${err}`);
+        }
+    }, 3_000).unref();
 }
 async function checkForBadWords(message) {
     const textToScan = message.content || "";
@@ -3324,6 +3375,7 @@ async function main() {
     startHardwarePerformanceWatchdog();
     startTempCleanup();
     startTempBlacklistCleanup();
+    checkMusicToolchain();
     updateYtDlpInBackground();
     loadBlacklist();
     if (!DISCORD_TOKEN) {
