@@ -2583,6 +2583,12 @@ function playNextTrack(guildId: string): void {
       resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
       logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
     }
+    player.on(AudioPlayerStatus.Playing, () => {
+      logToFile(`[MUSIC] Player state = PLAYING for "${track.title}"`);
+    });
+    player.on(AudioPlayerStatus.Buffering, () => {
+      logToFile(`[MUSIC] Player state = BUFFERING for "${track.title}"`);
+    });
     player.play(resource);
   } catch (err) {
     logToFile(`[MUSIC ERROR] Failed to start "${track.title}": ${err}`);
@@ -2658,25 +2664,47 @@ function updateYtDlpInBackground(): void {
 function checkMusicToolchain(): void {
   setTimeout(() => {
     try {
+      const execFileSync = require("child_process").execFileSync;
       const ytPath = ytdlp.constants?.YOUTUBE_DL_PATH || "unknown";
-      const ytExists = typeof ytPath === "string" && ytPath !== "unknown" ? fs.existsSync(ytPath) : false;
+      let ytRun = "not-run";
+      if (typeof ytPath === "string" && fs.existsSync(ytPath)) {
+        try {
+          const out = execFileSync(ytPath, ["--version"], { timeout: 10000 }).toString().trim();
+          ytRun = out.split("\n")[0];
+        } catch (err: any) {
+          ytRun = `FAILED: ${err?.message || err}`;
+        }
+      }
+      let ffmpegRun = "not-found";
       let ffmpegPath = "unknown";
-      let ffmpegExists = false;
       try {
         ffmpegPath = require("ffmpeg-static");
-        ffmpegExists = typeof ffmpegPath === "string" && ffmpegPath.length > 0 && fs.existsSync(ffmpegPath);
-      } catch {
+      } catch {}
+      if (typeof ffmpegPath === "string" && ffmpegPath.length > 0 && fs.existsSync(ffmpegPath)) {
         try {
-          const which = require("child_process").execFileSync("which", ["ffmpeg"]).toString().trim();
+          const out = execFileSync(ffmpegPath, ["-version"], { timeout: 10000 }).toString().trim();
+          ffmpegRun = out.split("\n")[0];
+        } catch (err: any) {
+          ffmpegRun = `FAILED: ${err?.message || err}`;
+        }
+      } else {
+        try {
+          const which = execFileSync("which", ["ffmpeg"]).toString().trim();
           if (which) {
             ffmpegPath = which;
-            ffmpegExists = fs.existsSync(which);
+            try {
+              const out = execFileSync(which, ["-version"], { timeout: 10000 }).toString().trim();
+              ffmpegRun = out.split("\n")[0];
+            } catch (err: any) {
+              ffmpegRun = `FAILED: ${err?.message || err}`;
+            }
           }
         } catch {}
       }
-      logToFile(`[MUSIC] Toolchain check — yt-dlp: ${ytPath} (exists: ${ytExists}) | ffmpeg: ${ffmpegPath} (exists: ${ffmpegExists})`);
-      if (!ytExists) logToFile(`[MUSIC WARN] yt-dlp binary missing — &play YouTube streaming will fail silently. Run npm install to restore it.`);
-      if (!ffmpegExists) logToFile(`[MUSIC WARN] ffmpeg not found — audio transcoding will fail. Install ffmpeg-static or system ffmpeg.`);
+      logToFile(`[MUSIC] Toolchain — yt-dlp[${ytPath}] => ${ytRun}`);
+      logToFile(`[MUSIC] Toolchain — ffmpeg[${ffmpegPath}] => ${ffmpegRun}`);
+      if (String(ytRun).startsWith("FAILED")) logToFile(`[MUSIC WARN] yt-dlp binary cannot execute — &play will produce 0 bytes (wrong platform? needs reinstall).`);
+      if (String(ffmpegRun).startsWith("FAILED") || ffmpegRun === "not-found") logToFile(`[MUSIC WARN] ffmpeg cannot execute — audio transcoding will fail.`);
     } catch (err) {
       logToFile(`[MUSIC] Toolchain check failed: ${err}`);
     }
