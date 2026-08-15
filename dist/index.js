@@ -53,7 +53,6 @@ const discord_js_1 = require("discord.js");
 const voice_1 = require("@discordjs/voice");
 const DiscordTTS = require("discord-tts");
 const ytdlp = require("youtube-dl-exec");
-const prism = require("prism-media");
 const ytSearch = __importStar(require("youtube-search-api"));
 const openai_1 = require("openai");
 const phone_server_1 = require("./phone-server");
@@ -1069,8 +1068,9 @@ async function registerSlashCommands(clientId, token) {
             .toJSON(),
         new discord_js_1.SlashCommandBuilder()
             .setName("play")
-            .setDescription("Play a song in the voice channel (search or YouTube link)")
-            .addStringOption(option => option.setName("query").setDescription("Song name or YouTube link").setRequired(true))
+            .setDescription("Play a song in the voice channel (search, YouTube link, or attach an audio file)")
+            .addStringOption(option => option.setName("query").setDescription("Song name or YouTube link").setRequired(false))
+            .addAttachmentOption(option => option.setName("file").setDescription("Audio file to play (optional)").setRequired(false))
             .setDMPermission(false)
             .toJSON(),
         new discord_js_1.SlashCommandBuilder()
@@ -1814,14 +1814,25 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
                 return;
             }
-            const query = interaction.options.getString("query", true);
+            const query = interaction.options.getString("query") ?? "";
+            const fileAttachment = interaction.options.getAttachment("file") ?? undefined;
+            if (!query && !fileAttachment) {
+                await interaction.reply({ content: "❌ Provide a song name/link or attach an audio file.", ephemeral: true });
+                return;
+            }
             const connection = await ensureMusicConnection(interaction.guild, interaction.member);
             if (!connection) {
                 await interaction.reply({ content: "❌ You need to be in a voice channel!", ephemeral: true });
                 return;
             }
-            await interaction.reply(`🔎 **Searching:** \`${query}\`...`);
-            const track = await resolveTrack(query);
+            await interaction.reply(`🔎 **Searching:** \`${fileAttachment ? fileAttachment.name : query}\`...`);
+            let track;
+            if (fileAttachment) {
+                track = await resolveAttachmentTrack(fileAttachment.url, fileAttachment.name);
+            }
+            else {
+                track = await resolveTrack(query);
+            }
             if (!track) {
                 await interaction.editReply("❌ Could not find that song.");
                 return;
@@ -2304,6 +2315,7 @@ async function searchYoutube(query) {
             duration: String(duration),
             thumbnail: String(thumbnail),
             requestedBy: "",
+            kind: "youtube",
         };
     }
     catch (err) {
@@ -2322,7 +2334,7 @@ async function resolveTrack(input) {
                 const thumb = Array.isArray(details.thumbnail?.thumbnails) && details.thumbnail.thumbnails.length
                     ? details.thumbnail.thumbnails[details.thumbnail.thumbnails.length - 1].url
                     : thumbnail;
-                return { title: String(details.title), url, duration: "", thumbnail: String(thumb), requestedBy: "" };
+                return { title: String(details.title), url, duration: "", thumbnail: String(thumb), requestedBy: "", kind: "youtube" };
             }
         }
         catch (err) {
@@ -2355,10 +2367,49 @@ async function resolveTrack(input) {
             }
         });
         if (info)
-            return { ...info, url, thumbnail, requestedBy: "" };
-        return { title: input, url, duration: "", thumbnail, requestedBy: "" };
+            return { ...info, url, thumbnail, requestedBy: "", kind: "youtube" };
+        return { title: input, url, duration: "", thumbnail, requestedBy: "", kind: "youtube" };
+    }
+    if (fs.existsSync(input)) {
+        const fullPath = path.resolve(input);
+        return {
+            title: path.basename(fullPath),
+            url: `file://${fullPath.replace(/\\/g, "/")}`,
+            duration: "",
+            thumbnail: "",
+            requestedBy: "",
+            kind: "file",
+            localPath: fullPath,
+        };
     }
     return searchYoutube(input);
+}
+async function resolveAttachmentTrack(url, name) {
+    try {
+        const audioDir = path.join(process.cwd(), "images_temps", "audio");
+        if (!fs.existsSync(audioDir))
+            fs.mkdirSync(audioDir, { recursive: true });
+        const safeName = name.replace(/[^a-zA-Z0-9._-]/g, "_") || `audio_${Date.now()}.mp3`;
+        const localPath = path.join(audioDir, `${Date.now()}_${safeName}`);
+        const response = await fetchWithTimeout(url, { redirect: "follow", headers: FETCH_HEADERS }, 60_000);
+        if (!response.ok)
+            return null;
+        const buffer = Buffer.from(await response.arrayBuffer());
+        fs.writeFileSync(localPath, buffer);
+        return {
+            title: safeName,
+            url: `file://${localPath.replace(/\\/g, "/")}`,
+            duration: "",
+            thumbnail: "",
+            requestedBy: "",
+            kind: "file",
+            localPath,
+        };
+    }
+    catch (err) {
+        logToFile(`[MUSIC ATTACHMENT ERROR] ${err}`);
+        return null;
+    }
 }
 async function ensureMusicConnection(guild, member) {
     const vc = member?.voice?.channel;
@@ -2437,39 +2488,34 @@ function playNextTrack(guildId) {
     state.player = player;
     connection.subscribe(player);
     try {
-        const child = ytdlp.exec(track.url, {
-            format: "bestaudio",
-            output: "-",
-            noPlaylist: true,
-            quiet: true,
-            noWarnings: true,
-        }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-        child.catch?.(() => { });
-        const stream = child.stdout;
-        stream.on("error", (err) => {
-            logToFile(`[MUSIC STREAM ERROR] ${err?.message || err}`);
-        });
-        child.stderr?.on("data", (chunk) => {
-            const line = chunk.toString().trim();
-            if (line.includes("ERROR"))
-                logToFile(`[MUSIC] yt-dlp: ${line}`);
-        });
-        const transcoder = new prism.FFmpeg({
-            args: [
-                "-analyzeduration", "0",
-                "-loglevel", "0",
-                "-f", "s16le",
-                "-ar", "48000",
-                "-ac", "2",
-            ],
-        });
-        stream.pipe(transcoder);
-        transcoder.on("error", (err) => {
-            logToFile(`[MUSIC FFMPEG ERROR] ${err?.message || err}`);
-        });
-        const resource = (0, voice_1.createAudioResource)(transcoder, { inputType: voice_1.StreamType.Raw });
+        let resource;
+        if (track.kind === "file" && track.localPath) {
+            resource = (0, voice_1.createAudioResource)(track.localPath, { inputType: voice_1.StreamType.Arbitrary });
+            logToFile(`[MUSIC] Now playing local file "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
+        }
+        else {
+            const child = ytdlp.exec(track.url, {
+                format: "bestaudio",
+                output: "-",
+                noPlaylist: true,
+                quiet: true,
+                noWarnings: true,
+            }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+            child.catch?.(() => { });
+            const stream = child.stdout;
+            stream.on("error", (err) => {
+                logToFile(`[MUSIC STREAM ERROR] ${err?.message || err}`);
+            });
+            child.stderr?.on("data", (chunk) => {
+                const line = chunk.toString().trim();
+                if (line.includes("ERROR"))
+                    logToFile(`[MUSIC] yt-dlp: ${line}`);
+            });
+            // StreamType.Arbitrary lets @discordjs/voice transcode with ffmpeg (via prism-media/ffmpeg-static)
+            resource = (0, voice_1.createAudioResource)(stream, { inputType: voice_1.StreamType.Arbitrary });
+            logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
+        }
         player.play(resource);
-        logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
     }
     catch (err) {
         logToFile(`[MUSIC ERROR] Failed to start "${track.title}": ${err}`);
@@ -2809,21 +2855,33 @@ async function handleMessage(message) {
             await message.reply("❌ This command only works in a server.");
             return;
         }
-        const query = (parts.join(" ") || "").trim();
-        if (!query) {
-            await message.reply("❌ Usage: `&play <song name or YouTube link>`");
-            return;
-        }
         const connection = await ensureMusicConnection(message.guild, message.member);
         if (!connection) {
             await message.reply("❌ You need to be in a voice channel!");
             return;
         }
-        await channel.send(`🔎 **Searching:** \`${query}\`...`);
-        const track = await resolveTrack(query);
-        if (!track) {
-            await channel.send("❌ Could not find that song.");
+        const attachment = message.attachments.first();
+        const query = (parts.join(" ") || "").trim();
+        if (!query && !attachment) {
+            await message.reply("❌ Usage: `&play <song name, YouTube link, file path>` — or attach an audio file to the message.");
             return;
+        }
+        let track = null;
+        if (attachment) {
+            await channel.send(`🔎 **Downloading:** \`${attachment.name}\`...`);
+            track = await resolveAttachmentTrack(attachment.url, attachment.name);
+            if (!track) {
+                await channel.send("❌ Could not download that file.");
+                return;
+            }
+        }
+        else {
+            await channel.send(`🔎 **Searching:** \`${query}\`...`);
+            track = await resolveTrack(query);
+            if (!track) {
+                await channel.send("❌ Could not find that song.");
+                return;
+            }
         }
         track.requestedBy = message.author.username;
         const state = getMusicState(message.guild.id);
