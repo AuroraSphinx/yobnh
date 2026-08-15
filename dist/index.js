@@ -1843,6 +1843,12 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
             enqueueTrack(interaction.guildId, track, interaction.channel);
             const playReply = buildMusicEmbed(wasEmpty ? `🎵 Playing` : `➕ Queued (#${state.queue.length})`, track);
             await interaction.editReply({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
+            if (wasEmpty) {
+                try {
+                    await interaction.deleteReply();
+                }
+                catch { }
+            }
         });
         return;
     }
@@ -2938,7 +2944,9 @@ async function handleMessage(message) {
         const state = getMusicState(message.guild.id);
         const wasEmpty = state.queue.length === 0 && !state.current;
         enqueueTrack(message.guild.id, track, channel);
-        const playReply = buildMusicEmbed(wasEmpty ? `🎵 Playing` : `➕ Queued (#${state.queue.length})`, track);
+        if (wasEmpty)
+            return;
+        const playReply = buildMusicEmbed(`➕ Queued (#${state.queue.length})`, track);
         await channel.send({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
         return;
     }
