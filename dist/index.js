@@ -2353,6 +2353,7 @@ async function resolveTrack(input) {
                     noWarnings: true,
                     quiet: true,
                     print: "%(title)s,,,%(duration_string)s",
+                    extractorArgs: "youtube:player_client=android,web_safari,tv",
                 }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
                 child.catch?.(() => { });
                 let out = "";
@@ -2506,6 +2507,7 @@ function playNextTrack(guildId) {
                 noPlaylist: true,
                 quiet: true,
                 noWarnings: true,
+                extractorArgs: "youtube:player_client=android,web_safari,tv",
             }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
             const stream = child.stdout;
             if (!stream) {
