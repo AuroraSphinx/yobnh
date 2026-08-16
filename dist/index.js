@@ -1891,27 +1891,36 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 return;
             }
             await interaction.reply(`🔎 **Searching:** \`${fileAttachment ? fileAttachment.name : query}\`...`);
-            let track;
+            let tracks;
             if (fileAttachment) {
                 if (!isPlayableMediaFile(fileAttachment.name, fileAttachment.contentType)) {
                     await interaction.editReply("❌ Only **audio/video** files can be played (no images, zips, or other files).");
                     return;
                 }
-                track = await resolveAttachmentTrack(fileAttachment.url, fileAttachment.name, fileAttachment.contentType);
+                const t = await resolveAttachmentTrack(fileAttachment.url, fileAttachment.name, fileAttachment.contentType);
+                tracks = t ? [t] : [];
             }
             else {
-                track = await resolveTrack(query);
+                tracks = await resolveTracks(query);
             }
-            if (!track) {
+            if (tracks.length === 0) {
                 await interaction.editReply("❌ Could not find that song.");
                 return;
             }
-            track.requestedBy = interaction.user.username;
             const state = getMusicState(interaction.guildId);
             const wasEmpty = state.queue.length === 0 && !state.current;
-            enqueueTrack(interaction.guildId, track, interaction.channel);
-            const playReply = buildMusicEmbed(wasEmpty ? (track.kind === "file" ? `🎵 Playing File` : `🎵 Playing`) : `➕ Queued (#${state.queue.length})`, track);
-            await interaction.editReply({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
+            for (const t of tracks) {
+                t.requestedBy = interaction.user.username;
+                enqueueTrack(interaction.guildId, t, interaction.channel);
+            }
+            const first = tracks[0];
+            if (tracks.length === 1) {
+                const playReply = buildMusicEmbed(wasEmpty ? (first.kind === "file" ? `🎵 Playing File` : `🎵 Playing`) : `➕ Queued (#${state.queue.length})`, first);
+                await interaction.editReply({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
+            }
+            else {
+                await interaction.editReply(`🎵 Added **${tracks.length}** tracks from Spotify to the queue!`);
+            }
             if (wasEmpty) {
                 try {
                     await interaction.deleteReply();
@@ -2495,6 +2504,105 @@ async function resolveTrack(input) {
         };
     }
     return searchYoutube(input);
+}
+function extractSpotifyRef(input) {
+    const match = input.trim().match(/open\.spotify\.com\/(?:intl-[a-z]+\/)?(track|album|playlist|artist)\/([A-Za-z0-9]+)/);
+    if (!match)
+        return null;
+    return { type: match[1], id: match[2] };
+}
+function ytdlpJson(url) {
+    return new Promise((resolve) => {
+        try {
+            const child = ytdlp.exec(url, {
+                dumpSingleJson: true,
+                flatPlaylist: true,
+                noWarnings: true,
+                quiet: true,
+                ignoreNoFormatsError: true,
+                retries: 2,
+                jsRuntimes: "deno",
+                remoteComponents: "ejs:npm",
+                ...ytCookieOption(),
+            }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: execEnv });
+            child.catch?.(() => { });
+            let out = "";
+            child.stdout?.on("data", (chunk) => { out += chunk.toString(); });
+            child.stderr?.on("data", () => { });
+            const timer = setTimeout(() => resolve(null), 30_000);
+            const finish = () => {
+                clearTimeout(timer);
+                try {
+                    resolve(out.trim() ? JSON.parse(out) : null);
+                }
+                catch {
+                    resolve(null);
+                }
+            };
+            child.once?.("close", finish);
+            child.once?.("error", () => { clearTimeout(timer); resolve(null); });
+        }
+        catch {
+            resolve(null);
+        }
+    });
+}
+function spotifyEntryDisplay(entry) {
+    const title = entry?.track || entry?.title || "";
+    const artist = Array.isArray(entry?.artists) ? entry.artists.map((a) => a?.name || "").join(", ") : entry?.artist || "";
+    return artist ? `${artist} - ${title}` : title;
+}
+async function resolveSpotifyTracks(input) {
+    const ref = extractSpotifyRef(input);
+    let data = await ytdlpJson(input);
+    if (!data && ref?.type === "track") {
+        try {
+            const oembed = await fetchWithTimeout(`https://open.spotify.com/oembed?url=${encodeURIComponent(input)}`, { redirect: "follow", headers: BROWSER_HEADERS }, 15_000);
+            if (oembed.ok) {
+                const json = await oembed.json();
+                if (json?.title) {
+                    const yt = await searchYoutube(String(json.title));
+                    if (yt) {
+                        yt.title = String(json.title);
+                        if (json.thumbnail_url)
+                            yt.thumbnail = String(json.thumbnail_url);
+                        return [yt];
+                    }
+                }
+            }
+        }
+        catch (err) {
+            logToFile(`[SPOTIFY OEMBED ERROR] ${err}`);
+        }
+        return [];
+    }
+    if (!data)
+        return [];
+    const entries = Array.isArray(data?.entries) && data.entries.length ? data.entries : [data];
+    const tracks = [];
+    for (const entry of entries) {
+        if (!entry || typeof entry !== "object")
+            continue;
+        const display = spotifyEntryDisplay(entry);
+        if (!display)
+            continue;
+        const yt = await searchYoutube(display);
+        if (!yt)
+            continue;
+        yt.title = display;
+        if (entry?.thumbnail)
+            yt.thumbnail = String(entry.thumbnail);
+        tracks.push(yt);
+        if (tracks.length >= 25)
+            break;
+    }
+    return tracks;
+}
+async function resolveTracks(input) {
+    if (extractSpotifyRef(input))
+        return resolveSpotifyTracks(input);
+    const track = await resolveTrack(input);
+    return track ? [track] : [];
 }
 const PLAYABLE_EXTENSIONS = new Set([
     "mp3", "wav", "ogg", "opus", "flac", "m4a", "aac", "wma", "webm",
@@ -3214,37 +3322,44 @@ async function handleMessage(message) {
         const attachment = message.attachments.first();
         const query = (parts.join(" ") || "").trim();
         if (!query && !attachment) {
-            await message.reply("❌ Usage: `&play <song name, YouTube link, file path>` — or attach an audio file to the message.");
+            await message.reply("❌ Usage: `&play <song name, YouTube/Spotify link, file path>` — or attach an audio file to the message.");
             return;
         }
-        let track = null;
+        let tracks = [];
         if (attachment) {
             if (!isPlayableMediaFile(attachment.name, attachment.contentType)) {
                 await channel.send("❌ Only **audio/video** files can be played (no images, zips, or other files).");
                 return;
             }
             await channel.send(`🔎 **Downloading:** \`${attachment.name}\`...`);
-            track = await resolveAttachmentTrack(attachment.url, attachment.name, attachment.contentType);
-            if (!track) {
+            const t = await resolveAttachmentTrack(attachment.url, attachment.name, attachment.contentType);
+            if (!t) {
                 await channel.send("❌ Could not download that file.");
                 return;
             }
+            tracks = [t];
         }
         else {
             await channel.send(`🔎 **Searching:** \`${query}\`...`);
-            track = await resolveTrack(query);
-            if (!track) {
+            tracks = await resolveTracks(query);
+            if (tracks.length === 0) {
                 await channel.send("❌ Could not find that song.");
                 return;
             }
         }
-        track.requestedBy = message.author.username;
         const state = getMusicState(message.guild.id);
         const wasEmpty = state.queue.length === 0 && !state.current;
-        enqueueTrack(message.guild.id, track, channel);
+        for (const t of tracks) {
+            t.requestedBy = message.author.username;
+            enqueueTrack(message.guild.id, t, channel);
+        }
         if (wasEmpty)
             return;
-        const playReply = buildMusicEmbed(`➕ Queued (#${state.queue.length})`, track);
+        if (tracks.length > 1) {
+            await channel.send(`🎵 Added **${tracks.length}** tracks from Spotify to the queue!`);
+            return;
+        }
+        const playReply = buildMusicEmbed(`➕ Queued (#${state.queue.length})`, tracks[0]);
         await channel.send({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
         return;
     }
