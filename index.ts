@@ -2349,6 +2349,12 @@ function extractVideoId(input: string): string | null {
   return match ? match[1] : null;
 }
 
+function ytCookieOption(): Record<string, string> {
+  const file = process.env.YOUTUBE_COOKIES || path.join(process.cwd(), "cookies.txt");
+  if (fs.existsSync(file)) return { cookies: file };
+  return {};
+}
+
 async function searchYoutube(query: string): Promise<MusicTrack | null> {
   try {
     const res = await ytSearch.GetListByKeyword(query, 1 as any) as any;
@@ -2401,6 +2407,7 @@ async function resolveTrack(input: string): Promise<MusicTrack | null> {
           ignoreNoFormatsError: true,
           retries: 2,
           extractorArgs: "youtube:player_client=android,web_safari,tv",
+          ...ytCookieOption(),
         }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
         child.catch?.(() => {});
         let out = "";
@@ -2556,6 +2563,7 @@ function playNextTrack(guildId: string): void {
         ignoreNoFormatsError: true,
         retries: 3,
         extractorArgs: "youtube:player_client=android,web_safari,tv",
+        ...ytCookieOption(),
       }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
       const stream = child.stdout;
       if (!stream) {
@@ -2709,6 +2717,7 @@ function checkMusicToolchain(): void {
       }
       logToFile(`[MUSIC] Toolchain — yt-dlp[${ytPath}] => ${ytRun}`);
       logToFile(`[MUSIC] Toolchain — ffmpeg[${ffmpegPath}] => ${ffmpegRun}`);
+      logToFile(`[MUSIC] Cookies — ${ytCookieOption().cookies ?? "none (VPS IP may be blocked by YouTube)"}`);
       if (String(ytRun).startsWith("FAILED")) logToFile(`[MUSIC WARN] yt-dlp binary cannot execute — &play will produce 0 bytes (wrong platform? needs reinstall).`);
       if (String(ffmpegRun).startsWith("FAILED") || ffmpegRun === "not-found") logToFile(`[MUSIC WARN] ffmpeg cannot execute — audio transcoding will fail.`);
     } catch (err) {
