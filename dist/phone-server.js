@@ -194,6 +194,13 @@ function startPhoneServer(client, getOwner) {
     server.listen(PHONE_PORT, () => {
         console.log(`📱 YOBNH-Phone server running on port ${PHONE_PORT}`);
     });
+    server.on("error", (err) => {
+        if (err?.code === "EADDRINUSE") {
+            console.error(`[PHONE] Port ${PHONE_PORT} already in use — another YOBNH instance is running. Exiting.`);
+            process.exit(1);
+        }
+        console.error("[PHONE] Server error:", err);
+    });
     return {
         pushAlert,
         port: PHONE_PORT,

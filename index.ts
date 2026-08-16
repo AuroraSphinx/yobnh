@@ -3555,6 +3555,7 @@ function setupGracefulShutdown(): void {
     console.log(`\n[SHUTDOWN] Received ${signal}. Cleaning up...`);
     logToFile(`[SHUTDOWN] Received ${signal}.`);
     saveBlacklist();
+    clearSingletonLock();
     try { terminalInterface?.close(); } catch {}
     try { discord.destroy(); } catch {}
     setTimeout(() => process.exit(0), 3000).unref();
@@ -3615,7 +3616,59 @@ function startTempBlacklistCleanup(): void {
   debugLog("TEMP BAN", "Temp blacklist cleanup scheduled every 60 seconds");
 }
 
+const SINGLETON_LOCK_FILE = path.join(process.cwd(), ".yobnh.lock");
+
+function writeSingletonLock(): void {
+  try {
+    fs.writeFileSync(SINGLETON_LOCK_FILE, String(process.pid));
+  } catch {}
+}
+
+function clearSingletonLock(): void {
+  try {
+    if (fs.existsSync(SINGLETON_LOCK_FILE)) {
+      const pid = Number(fs.readFileSync(SINGLETON_LOCK_FILE, "utf8").trim());
+      if (pid === process.pid) fs.rmSync(SINGLETON_LOCK_FILE, { force: true });
+    }
+  } catch {}
+}
+
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    return err?.code === "EPERM";
+  }
+}
+
+async function acquireSingletonLock(): Promise<boolean> {
+  try {
+    if (fs.existsSync(SINGLETON_LOCK_FILE)) {
+      const existingPid = Number(fs.readFileSync(SINGLETON_LOCK_FILE, "utf8").trim());
+      if (existingPid && existingPid !== process.pid && pidIsAlive(existingPid)) {
+        logToFile(`[LOCK] Another YOBNH instance is running (PID ${existingPid}). Waiting for it to exit...`);
+        console.log(`[LOCK] Another YOBNH instance is running (PID ${existingPid}). Waiting for it to exit...`);
+        const deadline = Date.now() + 20_000;
+        while (Date.now() < deadline && pidIsAlive(existingPid)) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        if (pidIsAlive(existingPid)) {
+          logToFile(`[LOCK] Existing instance (PID ${existingPid}) never exited. Refusing to start a duplicate.`);
+          console.log(`[LOCK] Existing instance (PID ${existingPid}) never exited. Refusing to start a duplicate.`);
+          return false;
+        }
+      }
+    }
+    writeSingletonLock();
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 async function main() {
+  if (!(await acquireSingletonLock())) return;
   const setupRl = readline.createInterface({ input: process.stdin, output: process.stdout });
   
   console.log("----------------------------------------");
