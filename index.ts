@@ -2380,6 +2380,7 @@ interface GuildMusic {
   textChannel: any;
   idleTimer: NodeJS.Timeout | null;
   volume: number;
+  nowPlayingMessage: any;
 }
 
 const musicState = new Map<string, GuildMusic>();
@@ -2387,7 +2388,7 @@ const musicState = new Map<string, GuildMusic>();
 function getMusicState(guildId: string): GuildMusic {
   let state = musicState.get(guildId);
   if (!state) {
-    state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null, volume: 1 }; 
+    state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null, volume: 1, nowPlayingMessage: null }; 
     musicState.set(guildId, state);
   }
   return state;
@@ -2652,6 +2653,7 @@ function playNextTrack(guildId: string): void {
   const track = state.queue.shift();
   if (!track) {
     state.current = null;
+    removeNowPlayingEmbed(state);
     state.idleTimer = setTimeout(() => {
       const s = getMusicState(guildId);
       if (s.queue.length === 0 && !s.current) {
@@ -2737,13 +2739,16 @@ function playNextTrack(guildId: string): void {
 
   if (state.textChannel) {
     try {
+      removeNowPlayingEmbed(state);
       const nowPlaying = buildMusicEmbed(
         `🎵 Now Playing`,
         track,
         `**Requested by:** ${track.requestedBy}`
       );
       const controls = buildMusicControls(state);
-      void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined, components: [controls] });
+      void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined, components: [controls] })
+        .then((msg: any) => { state.nowPlayingMessage = msg; })
+        .catch(() => {});
     } catch {}
   }
 
@@ -2768,8 +2773,16 @@ function enqueueTrack(guildId: string, track: MusicTrack, textChannel: any): voi
   if (wasEmpty) playNextTrack(guildId);
 }
 
+function removeNowPlayingEmbed(state: GuildMusic): void {
+  if (state.nowPlayingMessage) {
+    try { void state.nowPlayingMessage.delete().catch(() => {}); } catch {}
+    state.nowPlayingMessage = null;
+  }
+}
+
 function stopMusic(guildId: string): void {
   const state = getMusicState(guildId);
+  removeNowPlayingEmbed(state);
   state.queue = [];
   state.current = null;
   if (state.player) {

@@ -2341,7 +2341,7 @@ const musicState = new Map();
 function getMusicState(guildId) {
     let state = musicState.get(guildId);
     if (!state) {
-        state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null, volume: 1 };
+        state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null, volume: 1, nowPlayingMessage: null };
         musicState.set(guildId, state);
     }
     return state;
@@ -2604,6 +2604,7 @@ function playNextTrack(guildId) {
     const track = state.queue.shift();
     if (!track) {
         state.current = null;
+        removeNowPlayingEmbed(state);
         state.idleTimer = setTimeout(() => {
             const s = getMusicState(guildId);
             if (s.queue.length === 0 && !s.current) {
@@ -2690,9 +2691,12 @@ function playNextTrack(guildId) {
     }
     if (state.textChannel) {
         try {
+            removeNowPlayingEmbed(state);
             const nowPlaying = buildMusicEmbed(`🎵 Now Playing`, track, `**Requested by:** ${track.requestedBy}`);
             const controls = buildMusicControls(state);
-            void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined, components: [controls] });
+            void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined, components: [controls] })
+                .then((msg) => { state.nowPlayingMessage = msg; })
+                .catch(() => { });
         }
         catch { }
     }
@@ -2718,8 +2722,18 @@ function enqueueTrack(guildId, track, textChannel) {
     if (wasEmpty)
         playNextTrack(guildId);
 }
+function removeNowPlayingEmbed(state) {
+    if (state.nowPlayingMessage) {
+        try {
+            void state.nowPlayingMessage.delete().catch(() => { });
+        }
+        catch { }
+        state.nowPlayingMessage = null;
+    }
+}
 function stopMusic(guildId) {
     const state = getMusicState(guildId);
+    removeNowPlayingEmbed(state);
     state.queue = [];
     state.current = null;
     if (state.player) {
