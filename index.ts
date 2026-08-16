@@ -33,9 +33,10 @@ const BOT_VERSION = `v${pkg.version}`;
 // node_modules/.bin dir + node's own bin dir, so npm/npx resolve even under systemd
 const NODE_BIN_DIR = path.dirname(process.execPath);
 const LOCAL_BIN_DIR = path.join(process.cwd(), "node_modules", ".bin");
+const DENO_BIN_DIR = path.join(os.homedir(), ".deno", "bin");
 const execEnv = {
   ...process.env,
-  PATH: [LOCAL_BIN_DIR, NODE_BIN_DIR, process.env.PATH].filter(Boolean).join(path.delimiter),
+  PATH: [LOCAL_BIN_DIR, NODE_BIN_DIR, DENO_BIN_DIR, process.env.PATH].filter(Boolean).join(path.delimiter),
 };
 
 // --- Environment Variable Loader (.env support) --------------------------------
@@ -2407,8 +2408,10 @@ async function resolveTrack(input: string): Promise<MusicTrack | null> {
           ignoreNoFormatsError: true,
           retries: 2,
           extractorArgs: "youtube:player_client=android,web_safari,tv",
+          jsRuntimes: "deno",
+          remoteComponents: "ejs:npm",
           ...ytCookieOption(),
-        }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+        }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: execEnv });
         child.catch?.(() => {});
         let out = "";
         child.stdout?.on("data", (chunk: Buffer) => { out += chunk.toString(); });
@@ -2563,8 +2566,10 @@ function playNextTrack(guildId: string): void {
         ignoreNoFormatsError: true,
         retries: 3,
         extractorArgs: "youtube:player_client=android,web_safari,tv",
+        jsRuntimes: "deno",
+        remoteComponents: "ejs:npm",
         ...ytCookieOption(),
-      }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: execEnv });
       const stream = child.stdout;
       if (!stream) {
         logToFile(`[MUSIC ERROR] yt-dlp produced no stream for "${track.title}"`);
