@@ -68,9 +68,10 @@ const BOT_VERSION = `v${package_json_1.default.version}`;
 // node_modules/.bin dir + node's own bin dir, so npm/npx resolve even under systemd
 const NODE_BIN_DIR = path.dirname(process.execPath);
 const LOCAL_BIN_DIR = path.join(process.cwd(), "node_modules", ".bin");
+const DENO_BIN_DIR = path.join(os.homedir(), ".deno", "bin");
 const execEnv = {
     ...process.env,
-    PATH: [LOCAL_BIN_DIR, NODE_BIN_DIR, process.env.PATH].filter(Boolean).join(path.delimiter),
+    PATH: [LOCAL_BIN_DIR, NODE_BIN_DIR, DENO_BIN_DIR, process.env.PATH].filter(Boolean).join(path.delimiter),
 };
 // --- Environment Variable Loader (.env support) --------------------------------
 function loadEnvFile() {
@@ -1360,6 +1361,23 @@ function restartBot() {
     setTimeout(() => process.exit(0), 3000).unref();
 }
 discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
+    if (interaction.isButton()) {
+        setImmediate(async () => {
+            try {
+                const handled = await handleMusicButton(interaction, interaction.customId);
+                if (handled) {
+                    try {
+                        await interaction.deferUpdate().catch(() => { });
+                    }
+                    catch { }
+                }
+            }
+            catch (err) {
+                logToFile(`[MUSIC BUTTON ERROR] ${err}`);
+            }
+        });
+        return;
+    }
     if (!interaction.isChatInputCommand())
         return;
     if (isBlacklisted(interaction.user.id)) {
@@ -2362,8 +2380,10 @@ async function resolveTrack(input) {
                     ignoreNoFormatsError: true,
                     retries: 2,
                     extractorArgs: "youtube:player_client=android,web_safari,tv",
+                    jsRuntimes: "deno",
+                    remoteComponents: "ejs:npm",
                     ...ytCookieOption(),
-                }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+                }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: execEnv });
                 child.catch?.(() => { });
                 let out = "";
                 child.stdout?.on("data", (chunk) => { out += chunk.toString(); });
@@ -2473,6 +2493,72 @@ function buildMusicEmbed(heading, track, extraLine) {
         embed.setImage("attachment://playing.gif");
     return { embeds: [embed], files: gif ? [gif] : [] };
 }
+function buildMusicControls(state) {
+    const isPaused = state.player?.state.status === voice_1.AudioPlayerStatus.Paused;
+    const toggleButton = new discord_js_1.ButtonBuilder()
+        .setCustomId("music_toggle")
+        .setStyle(discord_js_1.ButtonStyle.Secondary)
+        .setLabel(isPaused ? "▶️ Resume" : "⏸️ Pause")
+        .setEmoji(isPaused ? "▶️" : "⏸️");
+    const skipButton = new discord_js_1.ButtonBuilder()
+        .setCustomId("music_skip")
+        .setStyle(discord_js_1.ButtonStyle.Primary)
+        .setLabel("Skip")
+        .setEmoji("⏭️");
+    const stopButton = new discord_js_1.ButtonBuilder()
+        .setCustomId("music_stop")
+        .setStyle(discord_js_1.ButtonStyle.Danger)
+        .setLabel("Stop")
+        .setEmoji("🛑");
+    return new discord_js_1.ActionRowBuilder().addComponents(toggleButton, skipButton, stopButton);
+}
+async function handleMusicButton(interaction, customId) {
+    if (!["music_toggle", "music_skip", "music_stop"].includes(customId))
+        return false;
+    if (!interaction.inCachedGuild()) {
+        await interaction.reply({ content: "❌ This only works in a server.", ephemeral: true });
+        return true;
+    }
+    const guildId = interaction.guildId;
+    const state = getMusicState(guildId);
+    if (customId === "music_toggle") {
+        if (!state.player || (state.player.state.status !== voice_1.AudioPlayerStatus.Playing && state.player.state.status !== voice_1.AudioPlayerStatus.Paused)) {
+            await interaction.reply({ content: "❌ Nothing is playing right now.", ephemeral: true });
+            return true;
+        }
+        if (state.player.state.status === voice_1.AudioPlayerStatus.Paused) {
+            state.player.unpause();
+            await interaction.reply({ content: "▶️ **Resumed!**", ephemeral: true });
+        }
+        else {
+            state.player.pause();
+            await interaction.reply({ content: "⏸️ **Paused.**", ephemeral: true });
+        }
+        return true;
+    }
+    if (customId === "music_skip") {
+        if (!state.current && state.queue.length === 0) {
+            await interaction.reply({ content: "❌ Nothing is playing right now.", ephemeral: true });
+            return true;
+        }
+        const current = state.current;
+        state.player?.stop();
+        await interaction.reply({ content: `⏭️ **Skipped:** ${current ? current.title : "the current song"}` });
+        return true;
+    }
+    if (customId === "music_stop") {
+        const connection = (0, voice_1.getVoiceConnection)(guildId);
+        if (!connection) {
+            await interaction.reply({ content: "❌ I'm not in a voice channel in this server.", ephemeral: true });
+            return true;
+        }
+        stopMusic(guildId);
+        logToFile(`[VOICE] ${interaction.user.tag} (${interaction.user.id}) stopped the music via button`);
+        await interaction.reply({ content: "🛑 **Stopped** the music and left the voice channel." });
+        return true;
+    }
+    return false;
+}
 function playNextTrack(guildId) {
     const state = getMusicState(guildId);
     const connection = (0, voice_1.getVoiceConnection)(guildId);
@@ -2519,8 +2605,10 @@ function playNextTrack(guildId) {
                 ignoreNoFormatsError: true,
                 retries: 3,
                 extractorArgs: "youtube:player_client=android,web_safari,tv",
+                jsRuntimes: "deno",
+                remoteComponents: "ejs:npm",
                 ...ytCookieOption(),
-            }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+            }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: execEnv });
             const stream = child.stdout;
             if (!stream) {
                 logToFile(`[MUSIC ERROR] yt-dlp produced no stream for "${track.title}"`);
@@ -2570,7 +2658,8 @@ function playNextTrack(guildId) {
     if (state.textChannel) {
         try {
             const nowPlaying = buildMusicEmbed(`🎵 Now Playing`, track, `**Requested by:** ${track.requestedBy}`);
-            void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined });
+            const controls = buildMusicControls(state);
+            void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined, components: [controls] });
         }
         catch { }
     }

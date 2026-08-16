@@ -12,7 +12,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import readline from "readline";
-import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, Team, ActivityType, PresenceUpdateStatus, ChannelType, SectionBuilder, TextDisplayBuilder, SeparatorBuilder, ThumbnailBuilder, ContainerBuilder, MessageFlags, EmbedBuilder } from "discord.js";
+import { Client, GatewayIntentBits, Events, Message, REST, Routes, SlashCommandBuilder, AttachmentBuilder, PermissionsBitField, Team, ActivityType, PresenceUpdateStatus, ChannelType, SectionBuilder, TextDisplayBuilder, SeparatorBuilder, ThumbnailBuilder, ContainerBuilder, MessageFlags, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } from "discord.js";
 import { joinVoiceChannel, getVoiceConnection, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, VoiceConnectionStatus, entersState, AudioPlayer } from "@discordjs/voice";
 const DiscordTTS = require("discord-tts");
 const ytdlp = require("youtube-dl-exec");
@@ -1370,6 +1370,20 @@ function restartBot(): void {
 }
 
 discord.on(Events.InteractionCreate, (interaction) => {
+  if (interaction.isButton()) {
+    setImmediate(async () => {
+      try {
+        const handled = await handleMusicButton(interaction, interaction.customId);
+        if (handled) {
+          try { await interaction.deferUpdate().catch(() => {}); } catch {}
+        }
+      } catch (err) {
+        logToFile(`[MUSIC BUTTON ERROR] ${err}`);
+      }
+    });
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   if (isBlacklisted(interaction.user.id)) {
@@ -2519,6 +2533,76 @@ function buildMusicEmbed(heading: string, track: MusicTrack, extraLine?: string)
   return { embeds: [embed], files: gif ? [gif] : [] };
 }
 
+function buildMusicControls(state: GuildMusic): ActionRowBuilder<any> {
+  const isPaused = state.player?.state.status === AudioPlayerStatus.Paused;
+  const toggleButton = new ButtonBuilder()
+    .setCustomId("music_toggle")
+    .setStyle(ButtonStyle.Secondary)
+    .setLabel(isPaused ? "▶️ Resume" : "⏸️ Pause")
+    .setEmoji(isPaused ? "▶️" : "⏸️");
+  const skipButton = new ButtonBuilder()
+    .setCustomId("music_skip")
+    .setStyle(ButtonStyle.Primary)
+    .setLabel("Skip")
+    .setEmoji("⏭️");
+  const stopButton = new ButtonBuilder()
+    .setCustomId("music_stop")
+    .setStyle(ButtonStyle.Danger)
+    .setLabel("Stop")
+    .setEmoji("🛑");
+  return new ActionRowBuilder<any>().addComponents(toggleButton, skipButton, stopButton);
+}
+
+async function handleMusicButton(interaction: any, customId: string): Promise<boolean> {
+  if (!["music_toggle", "music_skip", "music_stop"].includes(customId)) return false;
+  if (!interaction.inCachedGuild()) {
+    await interaction.reply({ content: "❌ This only works in a server.", ephemeral: true });
+    return true;
+  }
+  const guildId = interaction.guildId;
+  const state = getMusicState(guildId);
+
+  if (customId === "music_toggle") {
+    if (!state.player || (state.player.state.status !== AudioPlayerStatus.Playing && state.player.state.status !== AudioPlayerStatus.Paused)) {
+      await interaction.reply({ content: "❌ Nothing is playing right now.", ephemeral: true });
+      return true;
+    }
+    if (state.player.state.status === AudioPlayerStatus.Paused) {
+      state.player.unpause();
+      await interaction.reply({ content: "▶️ **Resumed!**", ephemeral: true });
+    } else {
+      state.player.pause();
+      await interaction.reply({ content: "⏸️ **Paused.**", ephemeral: true });
+    }
+    return true;
+  }
+
+  if (customId === "music_skip") {
+    if (!state.current && state.queue.length === 0) {
+      await interaction.reply({ content: "❌ Nothing is playing right now.", ephemeral: true });
+      return true;
+    }
+    const current = state.current;
+    state.player?.stop();
+    await interaction.reply({ content: `⏭️ **Skipped:** ${current ? current.title : "the current song"}` });
+    return true;
+  }
+
+  if (customId === "music_stop") {
+    const connection = getVoiceConnection(guildId);
+    if (!connection) {
+      await interaction.reply({ content: "❌ I'm not in a voice channel in this server.", ephemeral: true });
+      return true;
+    }
+    stopMusic(guildId);
+    logToFile(`[VOICE] ${interaction.user.tag} (${interaction.user.id}) stopped the music via button`);
+    await interaction.reply({ content: "🛑 **Stopped** the music and left the voice channel." });
+    return true;
+  }
+
+  return false;
+}
+
 function playNextTrack(guildId: string): void {
   const state = getMusicState(guildId);
   const connection = getVoiceConnection(guildId);
@@ -2622,7 +2706,8 @@ function playNextTrack(guildId: string): void {
         track,
         `**Requested by:** ${track.requestedBy}`
       );
-      void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined });
+      const controls = buildMusicControls(state);
+      void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined, components: [controls] });
     } catch {}
   }
 
