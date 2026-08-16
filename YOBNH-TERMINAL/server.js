@@ -30,7 +30,6 @@ app.use((req, res, next) => {
   res.status(401).send('401 Unauthorized');
 });
 
-// Serve the bot log from the project root without exposing the rest of the filesystem.
 app.get('/logs.txt', (req, res) => {
   res.type('text/plain').sendFile(path.join(__dirname, '..', 'logs.txt'));
 });
