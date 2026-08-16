@@ -1869,8 +1869,13 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
             const state = getMusicState(interaction.guildId);
             const wasEmpty = state.queue.length === 0 && !state.current;
             enqueueTrack(interaction.guildId, track, interaction.channel);
-            const playReply = buildMusicEmbed(wasEmpty ? `🎵 Playing` : `➕ Queued (#${state.queue.length})`, track);
-            await interaction.editReply({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
+            if (track.kind === "file") {
+                await interaction.editReply({ content: wasEmpty ? `Playing ["${track.title}"]` : `Queued ["${track.title}"]` });
+            }
+            else {
+                const playReply = buildMusicEmbed(wasEmpty ? `🎵 Playing` : `➕ Queued (#${state.queue.length})`, track);
+                await interaction.editReply({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
+            }
             if (wasEmpty) {
                 try {
                     await interaction.deleteReply();
@@ -2716,11 +2721,18 @@ function playNextTrack(guildId) {
     if (state.textChannel) {
         try {
             removeNowPlayingEmbed(state);
-            const nowPlaying = buildMusicEmbed(`🎵 Now Playing`, track, `**Requested by:** ${track.requestedBy}`);
             const controls = buildMusicControls(state);
-            void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined, components: [controls] })
-                .then((msg) => { state.nowPlayingMessage = msg; })
-                .catch(() => { });
+            if (track.kind === "file") {
+                void state.textChannel.send({ content: `Playing ["${track.title}"]`, components: [controls] })
+                    .then((msg) => { state.nowPlayingMessage = msg; })
+                    .catch(() => { });
+            }
+            else {
+                const nowPlaying = buildMusicEmbed(`🎵 Now Playing`, track, `**Requested by:** ${track.requestedBy}`);
+                void state.textChannel.send({ embeds: nowPlaying.embeds, files: nowPlaying.files.length ? nowPlaying.files : undefined, components: [controls] })
+                    .then((msg) => { state.nowPlayingMessage = msg; })
+                    .catch(() => { });
+            }
         }
         catch { }
     }
@@ -3178,6 +3190,10 @@ async function handleMessage(message) {
         enqueueTrack(message.guild.id, track, channel);
         if (wasEmpty)
             return;
+        if (track.kind === "file") {
+            await channel.send(`Queued ["${track.title}"]`);
+            return;
+        }
         const playReply = buildMusicEmbed(`➕ Queued (#${state.queue.length})`, track);
         await channel.send({ embeds: playReply.embeds, files: playReply.files.length ? playReply.files : undefined });
         return;
