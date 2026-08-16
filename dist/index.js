@@ -617,6 +617,22 @@ const FETCH_HEADERS = {
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 };
+const BROWSER_HEADERS = {
+    "User-Agent": FETCH_USER_AGENT,
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-CH-UA": '"Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    Referer: "https://www.google.com/",
+    Connection: "keep-alive",
+};
 function decodeHtmlEntities(text) {
     return text
         .replace(/&amp;/gi, "&")
@@ -694,16 +710,41 @@ async function buildVisionContentParts(message) {
 }
 async function browseUrl(url, _keepVisible = false, _viewportWidth = 1280, _viewportHeight = 720) {
     debugLog("INFO", "Fetching URL", { url });
-    const response = await fetchWithTimeout(url, { redirect: "follow", headers: FETCH_HEADERS });
-    if (!response.ok)
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
-    const html = await response.text();
-    const finalUrl = response.url || url;
-    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    const title = (titleMatch ? decodeHtmlEntities(htmlToText(titleMatch[1])) : "") || finalUrl;
-    const content = htmlToText(html).slice(0, 3000);
-    debugLog("INFO", "Fetched page", { status: response.status, length: html.length });
-    return { title: title.slice(0, 200), url: finalUrl, content };
+    let lastError = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const response = await fetchWithTimeout(url, { redirect: "follow", headers: BROWSER_HEADERS });
+            if (response.ok) {
+                const html = await response.text();
+                const finalUrl = response.url || url;
+                const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+                const title = (titleMatch ? decodeHtmlEntities(htmlToText(titleMatch[1])) : "") || finalUrl;
+                const content = htmlToText(html).slice(0, 3000);
+                debugLog("INFO", "Fetched page", { status: response.status, length: html.length });
+                return { title: title.slice(0, 200), url: finalUrl, content };
+            }
+            lastError = `HTTP ${response.status} ${response.statusText}`;
+        }
+        catch (err) {
+            lastError = err instanceof Error ? err.message : String(err);
+        }
+        debugLog("WARN", "Fetch attempt failed", { attempt, url, error: lastError });
+    }
+    try {
+        const readerUrl = `https://r.jina.ai/${url}`;
+        debugLog("INFO", "Trying fallback reader", { readerUrl });
+        const fallback = await fetchWithTimeout(readerUrl, { redirect: "follow", headers: BROWSER_HEADERS }, 45_000);
+        if (fallback.ok) {
+            const text = await fallback.text();
+            const content = text.slice(0, 3000);
+            return { title: url, url, content };
+        }
+        lastError = `${lastError} (reader also failed: HTTP ${fallback.status})`;
+    }
+    catch (err) {
+        lastError = `${lastError} (reader failed: ${err instanceof Error ? err.message : String(err)})`;
+    }
+    throw new Error(lastError || "Unknown fetch error");
 }
 function parseDuckDuckGoHtmlResults(html) {
     const results = [];
@@ -3524,6 +3565,10 @@ async function handleMessage(message) {
             if (needsFollowUp) {
                 if (browserData) {
                     addToHistory(channelId, userId, "user", `Browser results:\n${browserData}\n\nPlease answer the original question using this information.`);
+                    reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
+                }
+                else {
+                    addToHistory(channelId, userId, "user", `I was unable to fetch the page, but please still answer the original question based on what you know.`);
                     reply = await createChatResponse(getHistory(channelId, userId), RESPONSE_MODEL, 1024, 0.5);
                 }
                 addToHistory(channelId, userId, "assistant", reply);
