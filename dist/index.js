@@ -2345,7 +2345,7 @@ const musicState = new Map();
 function getMusicState(guildId) {
     let state = musicState.get(guildId);
     if (!state) {
-        state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null, volume: 1, nowPlayingMessage: null };
+        state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null, volume: 1, nowPlayingMessage: null, stopConfirmUntil: 0, stopConfirmUser: null };
         musicState.set(guildId, state);
     }
     return state;
@@ -2533,6 +2533,16 @@ function getPlayingGifAttachment() {
     catch { }
     return null;
 }
+const STOP_SURE_GIF_PATH = path.join(process.cwd(), "assets", "stop-sure.gif");
+function getStopSureGifAttachment() {
+    try {
+        if (fs.existsSync(STOP_SURE_GIF_PATH)) {
+            return new discord_js_1.AttachmentBuilder(STOP_SURE_GIF_PATH, { name: "stop-sure.gif" });
+        }
+    }
+    catch { }
+    return null;
+}
 function buildMusicEmbed(heading, track, extraLine) {
     const isFile = track.kind === "file";
     const embed = new discord_js_1.EmbedBuilder()
@@ -2608,9 +2618,23 @@ async function handleMusicButton(interaction, customId) {
             await interaction.reply({ content: "❌ Nothing is playing right now.", ephemeral: true });
             return true;
         }
+        const isConfirmed = state.stopConfirmUntil > Date.now() && state.stopConfirmUser === interaction.user.id;
+        if (!isConfirmed) {
+            state.stopConfirmUntil = Date.now() + 15_000;
+            state.stopConfirmUser = interaction.user.id;
+            const gif = getStopSureGifAttachment();
+            await interaction.reply({
+                content: "Are you sure that you want to stop the song? You can always mute on the bot.",
+                files: gif ? [gif] : undefined,
+                ephemeral: true,
+            });
+            return true;
+        }
+        state.stopConfirmUntil = 0;
+        state.stopConfirmUser = null;
         stopPlayback(guildId);
         logToFile(`[VOICE] ${interaction.user.tag} (${interaction.user.id}) stopped the music via button`);
-        await interaction.reply({ content: "🛑 **Stopped** the music. Use `&play` again to play something." });
+        await interaction.reply({ content: `**${interaction.user.username}** stopped the song. Use \`&play\` again to play something.` });
         return true;
     }
     return false;
