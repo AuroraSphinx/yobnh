@@ -1865,7 +1865,11 @@ discord.on(Events.InteractionCreate, (interaction) => {
       await interaction.reply(`🔎 **Searching:** \`${fileAttachment ? fileAttachment.name : query}\`...`);
       let track: MusicTrack | null;
       if (fileAttachment) {
-        track = await resolveAttachmentTrack(fileAttachment.url, fileAttachment.name);
+        if (!isPlayableMediaFile(fileAttachment.name, fileAttachment.contentType)) {
+          await interaction.editReply("❌ Only **audio/video** files can be played (no images, zips, or other files).");
+          return;
+        }
+        track = await resolveAttachmentTrack(fileAttachment.url, fileAttachment.name, fileAttachment.contentType);
       } else {
         track = await resolveTrack(query);
       }
@@ -2496,8 +2500,29 @@ async function resolveTrack(input: string): Promise<MusicTrack | null> {
   return searchYoutube(input);
 }
 
-async function resolveAttachmentTrack(url: string, name: string): Promise<MusicTrack | null> {
+const PLAYABLE_EXTENSIONS = new Set([
+  "mp3", "wav", "ogg", "opus", "flac", "m4a", "aac", "wma", "webm",
+  "mp4", "mov", "mkv", "avi", "m4v", "3gp", "mpeg", "mpg",
+]);
+
+const PLAYABLE_MIME_PREFIXES = ["audio/", "video/"];
+
+function isPlayableMediaFile(name: string, contentType?: string | null): boolean {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (PLAYABLE_EXTENSIONS.has(ext)) return true;
+  if (contentType) {
+    const mime = contentType.split(";")[0].trim().toLowerCase();
+    if (PLAYABLE_MIME_PREFIXES.some((prefix) => mime.startsWith(prefix))) return true;
+  }
+  return false;
+}
+
+async function resolveAttachmentTrack(url: string, name: string, contentType?: string | null): Promise<MusicTrack | null> {
   try {
+    if (!isPlayableMediaFile(name, contentType)) {
+      logToFile(`[MUSIC ATTACHMENT REJECTED] "${name}" is not an audio/video file`);
+      return null;
+    }
     const audioDir = path.join(process.cwd(), "images_temps", "audio");
     if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir, { recursive: true });
     const safeName = name.replace(/[^a-zA-Z0-9._-]/g, "_") || `audio_${Date.now()}.mp3`;
@@ -2624,14 +2649,14 @@ async function handleMusicButton(interaction: any, customId: string): Promise<bo
   }
 
   if (customId === "music_stop") {
-    const connection = getVoiceConnection(guildId);
-    if (!connection) {
-      await interaction.reply({ content: "❌ I'm not in a voice channel in this server.", ephemeral: true });
+    const state = getMusicState(guildId);
+    if (!state.player && !state.current && state.queue.length === 0) {
+      await interaction.reply({ content: "❌ Nothing is playing right now.", ephemeral: true });
       return true;
     }
-    stopMusic(guildId);
+    stopPlayback(guildId);
     logToFile(`[VOICE] ${interaction.user.tag} (${interaction.user.id}) stopped the music via button`);
-    await interaction.reply({ content: "🛑 **Stopped** the music and left the voice channel." });
+    await interaction.reply({ content: "🛑 **Stopped** the music. Use `&play` again to play something." });
     return true;
   }
 
@@ -2796,6 +2821,22 @@ function stopMusic(guildId: string): void {
   const connection = getVoiceConnection(guildId);
   if (connection) connection.destroy();
   musicState.delete(guildId);
+}
+
+function stopPlayback(guildId: string): void {
+  const state = getMusicState(guildId);
+  removeNowPlayingEmbed(state);
+  state.queue = [];
+  state.current = null;
+  if (state.player) {
+    try { state.player.removeAllListeners(); } catch {}
+    try { state.player.stop(); } catch {}
+  }
+  state.player = null;
+  if (state.idleTimer) {
+    clearTimeout(state.idleTimer);
+    state.idleTimer = null;
+  }
 }
 
 function updateYtDlpInBackground(): void {
@@ -3161,8 +3202,12 @@ async function handleMessage(message: Message): Promise<void> {
     }
     let track: MusicTrack | null = null;
     if (attachment) {
+      if (!isPlayableMediaFile(attachment.name, attachment.contentType)) {
+        await channel.send("❌ Only **audio/video** files can be played (no images, zips, or other files).");
+        return;
+      }
       await channel.send(`🔎 **Downloading:** \`${attachment.name}\`...`);
-      track = await resolveAttachmentTrack(attachment.url, attachment.name);
+      track = await resolveAttachmentTrack(attachment.url, attachment.name, attachment.contentType);
       if (!track) {
         await channel.send("❌ Could not download that file.");
         return;
