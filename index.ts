@@ -2398,6 +2398,8 @@ async function resolveTrack(input: string): Promise<MusicTrack | null> {
           noWarnings: true,
           quiet: true,
           print: "%(title)s,,,%(duration_string)s",
+          ignoreNoFormatsError: true,
+          retries: 2,
           extractorArgs: "youtube:player_client=android,web_safari,tv",
         }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
         child.catch?.(() => {});
@@ -2546,11 +2548,13 @@ function playNextTrack(guildId: string): void {
       logToFile(`[MUSIC] Now playing local file "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
     } else {
       const child = ytdlp.exec(track.url, {
-        format: "bestaudio",
+        format: "bestaudio[ext=m4a]/bestaudio/best",
         output: "-",
         noPlaylist: true,
         quiet: true,
         noWarnings: true,
+        ignoreNoFormatsError: true,
+        retries: 3,
         extractorArgs: "youtube:player_client=android,web_safari,tv",
       }, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
       const stream = child.stdout;
