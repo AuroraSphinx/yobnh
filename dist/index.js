@@ -1098,6 +1098,12 @@ async function registerSlashCommands(clientId, token) {
             .setName("queue")
             .setDescription("Show the current music queue")
             .setDMPermission(false)
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("volume")
+            .setDescription("Set the volume of the currently playing song (1-150)")
+            .addIntegerOption(option => option.setName("level").setDescription("Volume level 1-150").setRequired(true).setMinValue(1).setMaxValue(150))
+            .setDMPermission(false)
             .toJSON()
     ];
     const rest = new discord_js_1.REST({ version: "10" }).setToken(token);
@@ -1962,6 +1968,31 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
         });
         return;
     }
+    if (interaction.commandName === "volume") {
+        setImmediate(async () => {
+            if (!interaction.inCachedGuild()) {
+                await interaction.reply({ content: "❌ This command only works in a server.", ephemeral: true });
+                return;
+            }
+            const state = getMusicState(interaction.guildId);
+            if (!state.player || state.player.state.status !== voice_1.AudioPlayerStatus.Playing) {
+                await interaction.reply({ content: "❌ No song is playing right now.", ephemeral: true });
+                return;
+            }
+            const level = interaction.options.getInteger("level", true);
+            const volume = Math.max(1, Math.min(150, level)) / 100;
+            state.volume = volume;
+            const resource = state.player.state.resource;
+            try {
+                resource?.volume?.setVolume(volume);
+            }
+            catch (err) {
+                logToFile(`[MUSIC VOLUME ERROR] ${err}`);
+            }
+            await interaction.reply({ content: `🔊 **Volume set to** ${level}%` });
+        });
+        return;
+    }
 });
 discord.once(discord_js_1.Events.ClientReady, async (client) => {
     logToFile(`[BOT] Logged in as ${client.user.tag}`);
@@ -2310,7 +2341,7 @@ const musicState = new Map();
 function getMusicState(guildId) {
     let state = musicState.get(guildId);
     if (!state) {
-        state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null };
+        state = { queue: [], current: null, player: null, textChannel: null, idleTimer: null, volume: 1 };
         musicState.set(guildId, state);
     }
     return state;
@@ -2592,7 +2623,8 @@ function playNextTrack(guildId) {
     try {
         let resource;
         if (track.kind === "file" && track.localPath) {
-            resource = (0, voice_1.createAudioResource)(track.localPath, { inputType: voice_1.StreamType.Arbitrary });
+            resource = (0, voice_1.createAudioResource)(track.localPath, { inputType: voice_1.StreamType.Arbitrary, inlineVolume: true });
+            resource.volume?.setVolume(state.volume);
             logToFile(`[MUSIC] Now playing local file "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
         }
         else {
@@ -2639,7 +2671,8 @@ function playNextTrack(guildId) {
                 }
             }, 10_000).unref?.();
             // StreamType.Arbitrary lets @discordjs/voice transcode with ffmpeg (via prism-media/ffmpeg-static)
-            resource = (0, voice_1.createAudioResource)(stream, { inputType: voice_1.StreamType.Arbitrary });
+            resource = (0, voice_1.createAudioResource)(stream, { inputType: voice_1.StreamType.Arbitrary, inlineVolume: true });
+            resource.volume?.setVolume(state.volume);
             logToFile(`[MUSIC] Now playing "${track.title}" in guild ${guildId} (ffmpeg transcoder)`);
         }
         player.on(voice_1.AudioPlayerStatus.Playing, () => {
@@ -3166,6 +3199,34 @@ async function handleMessage(message) {
                 lines.push(`...and ${state.queue.length - 10} more`);
         }
         await message.reply(lines.join("\n"));
+        return;
+    }
+    if (prefixCommand === "volume") {
+        if (isDM) {
+            await message.reply("❌ This command only works in a server.");
+            return;
+        }
+        const state = getMusicState(message.guild.id);
+        if (!state.player || state.player.state.status !== voice_1.AudioPlayerStatus.Playing) {
+            await message.reply("❌ No song is playing right now.");
+            return;
+        }
+        const parsed = parseInt(parts[0], 10);
+        if (Number.isNaN(parsed)) {
+            await message.reply(`🔊 Current volume is **${Math.round(state.volume * 100)}%**. Usage: \`&volume <1-150>\``);
+            return;
+        }
+        const level = Math.max(1, Math.min(150, parsed));
+        const volume = level / 100;
+        state.volume = volume;
+        const resource = state.player.state.resource;
+        try {
+            resource?.volume?.setVolume(volume);
+        }
+        catch (err) {
+            logToFile(`[MUSIC VOLUME ERROR] ${err}`);
+        }
+        await message.reply(`🔊 **Volume set to** ${level}%`);
         return;
     }
     if (prefixCommand === "send-dm") {
