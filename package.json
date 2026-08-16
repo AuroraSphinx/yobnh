@@ -1,6 +1,6 @@
 {
   "name": "discord-ai-bot",
-  "version": "1.13.4",
+  "version": "1.13.5",
   "description": "Discord AI bot powered by Claude",
   "main": "dist/index.js",
   "type": "commonjs",
