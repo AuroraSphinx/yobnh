@@ -103,7 +103,6 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY ?? "";
 const MISTRAL_BASE_URL = (process.env.MISTRAL_BASE_URL ?? "https://api.mistral.ai").replace(/\/$/, "");
 const USE_MISTRAL = Boolean(MISTRAL_API_KEY || MISTRAL_BASE_URL.includes("mistral"));
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const GITHUB_REPO = process.env.GITHUB_REPO ?? "AuroraSphinx/yobnh";
 const PLAYWRIGHT_BROWSERS_PATH = process.env.PLAYWRIGHT_BROWSERS_PATH ?? null;
 const VERBOSE = process.env.VERBOSE === "true";
@@ -1190,12 +1189,9 @@ async function registerSlashCommands(clientId, token) {
 async function updateBotFromGitHub(channel, requestedBy) {
     const send = (text) => channel.send(text).catch(() => { });
     try {
-        if (!GITHUB_TOKEN) {
-            await send("❌ No `GITHUB_TOKEN` configured. Cannot access the private repository.");
-            return;
-        }
+        // This repository is public. Avoid sending a stale token, which causes
+        // GitHub to return 401 instead of serving the public API response.
         const headers = {
-            Authorization: `Bearer ${GITHUB_TOKEN}`,
             Accept: "application/vnd.github+json",
             "User-Agent": "yobnh-bot",
         };
@@ -1338,7 +1334,6 @@ async function fetchLatestCommits(perPage = 10) {
     const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/commits?per_page=${perPage}`;
     const resp = await fetch(apiUrl, {
         headers: {
-            Authorization: `Bearer ${GITHUB_TOKEN}`,
             Accept: "application/vnd.github+json",
             "User-Agent": "yobnh-bot",
         },
@@ -1403,8 +1398,6 @@ async function postNewCommitsToChannel(channelId) {
 async function autoPostCommits() {
     const config = loadUpdateChannelConfig();
     if (!config.channelId)
-        return;
-    if (!GITHUB_TOKEN)
         return;
     try {
         const count = await postNewCommitsToChannel(config.channelId);
@@ -1731,11 +1724,6 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 return;
             }
             const targetChannel = interaction.options.getChannel("channel", true);
-            if (!GITHUB_TOKEN) {
-                const failText = new discord_js_1.TextDisplayBuilder().setContent(`# ❌ Commit Fetch Failed\n\nNo \`GITHUB_TOKEN\` environment variable is set. Cannot access the private repository.`);
-                await interaction.editReply({ components: [failText], flags: discord_js_1.MessageFlags.IsComponentsV2 });
-                return;
-            }
             try {
                 const config = loadUpdateChannelConfig();
                 saveUpdateChannelConfig({ channelId: targetChannel.id, lastSha: config.lastSha });
@@ -3591,10 +3579,6 @@ async function handleMessage(message) {
         const targetId = (parts[0] || "").replace(/[<#>]/g, "");
         if (!targetId) {
             await message.reply("❌ Usage: `&update-channel <#channel> [disable]`");
-            return;
-        }
-        if (!GITHUB_TOKEN) {
-            await channel.send("❌ No `GITHUB_TOKEN` environment variable is set. Cannot access the private repository.");
             return;
         }
         try {
