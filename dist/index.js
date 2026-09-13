@@ -1145,6 +1145,10 @@ async function registerSlashCommands(clientId, token) {
             .setDescription("Set the volume of the currently playing song (1-150)")
             .addIntegerOption(option => option.setName("level").setDescription("Volume level 1-150").setRequired(true).setMinValue(1).setMaxValue(150))
             .setDMPermission(false)
+            .toJSON(),
+        new discord_js_1.SlashCommandBuilder()
+            .setName("maintenance")
+            .setDescription("Announce that YOBNH is under maintenance (broadcasts to all servers/channels the bot is in)")
             .toJSON()
     ];
     const rest = new discord_js_1.REST({ version: "10" }).setToken(token);
@@ -2044,6 +2048,37 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 logToFile(`[MUSIC VOLUME ERROR] ${err}`);
             }
             await interaction.reply({ content: `🔊 **Volume set to** ${level}%` });
+        });
+        return;
+    }
+    if (interaction.commandName === "maintenance") {
+        setImmediate(async () => {
+            if (!interaction.memberPermissions?.has('Administrator') && interaction.user.id !== OWNER_ID) {
+                await interaction.reply({ content: "❌ You do not have permission to use this command.", ephemeral: true });
+                return;
+            }
+            await interaction.deferReply({ ephemeral: true });
+            const announcement = new discord_js_1.EmbedBuilder()
+                .setColor(0xff0000)
+                .setTitle("YOBNH is not available right now.")
+                .setDescription("Hello guys, I'm sorry to say this, but YOBNH will be under maintenance because the Mistral key expired or something else happened. We are trying to find another key or get the Mistral key again. Thank you!")
+                .setTimestamp();
+            let sentCount = 0;
+            for (const guild of discord.guilds.cache.values()) {
+                const channels = guild.channels.cache.filter((c) => c.type === discord_js_1.ChannelType.GuildText &&
+                    c.permissionsFor(discord.user.id)?.has(discord_js_1.PermissionsBitField.Flags.SendMessages));
+                for (const channel of channels.values()) {
+                    try {
+                        await channel.send({ embeds: [announcement] });
+                        sentCount++;
+                    }
+                    catch (err) {
+                        logToFile(`[MAINTENANCE] Failed to announce in ${guild.name}/${channel.name}: ${err}`);
+                    }
+                }
+            }
+            logToFile(`[MAINTENANCE] Broadcast maintenance announcement to ${sentCount} channels by ${interaction.user.tag}`);
+            await interaction.editReply({ content: `✅ Announced maintenance in **${sentCount}** channels across all servers.` });
         });
         return;
     }
