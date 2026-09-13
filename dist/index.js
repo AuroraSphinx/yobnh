@@ -274,6 +274,31 @@ let phoneServer = null;
 function isOwner(userId) {
     return userId === OWNER_ID || OWNER_IDS.includes(userId);
 }
+function buildMaintenanceAnnouncementEmbed() {
+    return new discord_js_1.EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle("YOBNH is not available right now.")
+        .setDescription("Hello guys, I'm sorry to say this, but YOBNH will be under maintenance because the Mistral key expired or something else happened. We are trying to find another key or get the Mistral key again. Thank you!")
+        .setTimestamp();
+}
+async function broadcastMaintenanceAnnouncement() {
+    const announcement = buildMaintenanceAnnouncementEmbed();
+    let sentCount = 0;
+    for (const guild of discord.guilds.cache.values()) {
+        const channels = guild.channels.cache.filter((c) => c.type === discord_js_1.ChannelType.GuildText &&
+            c.permissionsFor(discord.user.id)?.has(discord_js_1.PermissionsBitField.Flags.SendMessages));
+        for (const channel of channels.values()) {
+            try {
+                await channel.send({ embeds: [announcement] });
+                sentCount++;
+            }
+            catch (err) {
+                logToFile(`[MAINTENANCE] Failed to announce in ${guild.name}/${channel.name}: ${err}`);
+            }
+        }
+    }
+    return sentCount;
+}
 const MAINTENANCE_SERVER_ID = "1535895840160481352";
 let maintenanceMode = false;
 let verboseEnabled = VERBOSE;
@@ -2058,25 +2083,7 @@ discord.on(discord_js_1.Events.InteractionCreate, (interaction) => {
                 return;
             }
             await interaction.deferReply({ ephemeral: true });
-            const announcement = new discord_js_1.EmbedBuilder()
-                .setColor(0xff0000)
-                .setTitle("YOBNH is not available right now.")
-                .setDescription("Hello guys, I'm sorry to say this, but YOBNH will be under maintenance because the Mistral key expired or something else happened. We are trying to find another key or get the Mistral key again. Thank you!")
-                .setTimestamp();
-            let sentCount = 0;
-            for (const guild of discord.guilds.cache.values()) {
-                const channels = guild.channels.cache.filter((c) => c.type === discord_js_1.ChannelType.GuildText &&
-                    c.permissionsFor(discord.user.id)?.has(discord_js_1.PermissionsBitField.Flags.SendMessages));
-                for (const channel of channels.values()) {
-                    try {
-                        await channel.send({ embeds: [announcement] });
-                        sentCount++;
-                    }
-                    catch (err) {
-                        logToFile(`[MAINTENANCE] Failed to announce in ${guild.name}/${channel.name}: ${err}`);
-                    }
-                }
-            }
+            const sentCount = await broadcastMaintenanceAnnouncement();
             logToFile(`[MAINTENANCE] Broadcast maintenance announcement to ${sentCount} channels by ${interaction.user.tag}`);
             await interaction.editReply({ content: `✅ Announced maintenance in **${sentCount}** channels across all servers.` });
         });
@@ -3171,15 +3178,21 @@ async function handleMessage(message) {
             return;
         }
         const arg = (message.content.slice(PREFIX.length).trim().split(/\s+/)[1] || "").toLowerCase();
+        const turnedOn = arg === "on" || (arg !== "off" && !maintenanceMode);
         if (arg === "on")
             maintenanceMode = true;
         else if (arg === "off")
             maintenanceMode = false;
         else
             maintenanceMode = !maintenanceMode;
-        await channel.send(maintenanceMode
-            ? `🔧 **Maintenance mode is now ON.** YOBNH will only work in <#${MAINTENANCE_SERVER_ID}>.`
-            : "✅ **Maintenance mode is now OFF.** YOBNH works everywhere again.");
+        if (turnedOn && maintenanceMode) {
+            await channel.send("🔧 **Maintenance mode is now ON.** Broadcasting the maintenance notice...");
+            const sentCount = await broadcastMaintenanceAnnouncement();
+            await channel.send(`📢 **Maintenance notice sent to ${sentCount} channels** across all servers YOBNH has joined.`);
+        }
+        else {
+            await channel.send("✅ **Maintenance mode is now OFF.** YOBNH works everywhere again.");
+        }
         return;
     }
     if (prefixCommand === "update") {
