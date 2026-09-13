@@ -264,20 +264,41 @@ async function broadcastMaintenanceAnnouncement(): Promise<number> {
   const announcement = buildMaintenanceAnnouncementEmbed();
   let sentCount = 0;
   for (const guild of discord.guilds.cache.values()) {
-    const channels = guild.channels.cache.filter((c: any) =>
-      c.type === ChannelType.GuildText &&
-      c.permissionsFor(discord.user!.id)?.has(PermissionsBitField.Flags.SendMessages)
-    );
-    for (const channel of channels.values()) {
-      try {
-        await (channel as any).send({ embeds: [announcement] });
-        sentCount++;
-      } catch (err) {
-        logToFile(`[MAINTENANCE] Failed to announce in ${guild.name}/${(channel as any).name}: ${err}`);
-      }
+    const candidate = await getGuildDefaultChannel(guild);
+    if (!candidate) {
+      logToFile(`[MAINTENANCE] No default channel found in ${guild.name}`);
+      continue;
+    }
+    try {
+      await (candidate as any).send({ embeds: [announcement] });
+      sentCount++;
+    } catch (err) {
+      logToFile(`[MAINTENANCE] Failed to announce in ${guild.name}/${(candidate as any).name}: ${err}`);
     }
   }
   return sentCount;
+}
+
+async function getGuildDefaultChannel(guild: any): Promise<any | null> {
+  const sortByPosition = (a: any, b: any) => (a.position ?? 0) - (b.position ?? 0);
+  const canSend = (c: any) =>
+    c.type === ChannelType.GuildText &&
+    c.permissionsFor(discord.user!.id)?.has(PermissionsBitField.Flags.SendMessages);
+  const preferredIds = [guild.systemChannelId, guild.rulesChannelId];
+  for (const id of preferredIds) {
+    if (!id) continue;
+    const ch = guild.channels.cache.get(id);
+    if (ch && canSend(ch)) return ch;
+  }
+  const general = guild.channels.cache
+    .filter((c: any) => canSend(c) && /^general/i.test((c as any).name || ""))
+    .sort(sortByPosition)
+    .first();
+  if (general) return general;
+  return guild.channels.cache
+    .filter((c: any) => canSend(c))
+    .sort(sortByPosition)
+    .first() || null;
 }
 const MAINTENANCE_SERVER_ID = "1535895840160481352";
 let maintenanceMode = false;

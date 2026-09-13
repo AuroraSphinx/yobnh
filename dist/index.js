@@ -284,19 +284,43 @@ async function broadcastMaintenanceAnnouncement() {
     const announcement = buildMaintenanceAnnouncementEmbed();
     let sentCount = 0;
     for (const guild of discord.guilds.cache.values()) {
-        const channels = guild.channels.cache.filter((c) => c.type === discord_js_1.ChannelType.GuildText &&
-            c.permissionsFor(discord.user.id)?.has(discord_js_1.PermissionsBitField.Flags.SendMessages));
-        for (const channel of channels.values()) {
-            try {
-                await channel.send({ embeds: [announcement] });
-                sentCount++;
-            }
-            catch (err) {
-                logToFile(`[MAINTENANCE] Failed to announce in ${guild.name}/${channel.name}: ${err}`);
-            }
+        const candidate = await getGuildDefaultChannel(guild);
+        if (!candidate) {
+            logToFile(`[MAINTENANCE] No default channel found in ${guild.name}`);
+            continue;
+        }
+        try {
+            await candidate.send({ embeds: [announcement] });
+            sentCount++;
+        }
+        catch (err) {
+            logToFile(`[MAINTENANCE] Failed to announce in ${guild.name}/${candidate.name}: ${err}`);
         }
     }
     return sentCount;
+}
+async function getGuildDefaultChannel(guild) {
+    const sortByPosition = (a, b) => (a.position ?? 0) - (b.position ?? 0);
+    const canSend = (c) => c.type === discord_js_1.ChannelType.GuildText &&
+        c.permissionsFor(discord.user.id)?.has(discord_js_1.PermissionsBitField.Flags.SendMessages);
+    const preferredIds = [guild.systemChannelId, guild.rulesChannelId];
+    for (const id of preferredIds) {
+        if (!id)
+            continue;
+        const ch = guild.channels.cache.get(id);
+        if (ch && canSend(ch))
+            return ch;
+    }
+    const general = guild.channels.cache
+        .filter((c) => canSend(c) && /^general/i.test(c.name || ""))
+        .sort(sortByPosition)
+        .first();
+    if (general)
+        return general;
+    return guild.channels.cache
+        .filter((c) => canSend(c))
+        .sort(sortByPosition)
+        .first() || null;
 }
 const MAINTENANCE_SERVER_ID = "1535895840160481352";
 let maintenanceMode = false;
